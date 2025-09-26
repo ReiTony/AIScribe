@@ -1,8 +1,7 @@
-# Python Backend Workflow: FastAPI + External LLM (Single Server)
+# Python Backend Workflow: FastAPI (All Services) + External LLM (Single Server)
 
 This document explains, in plain language, how our Python side works end-to-end.
-We run one FastAPI app that talks to an external LLM API (like OpenAI). No separate AI server is needed right now, but we keep the code organized so we can split it later if we grow.
-
+We run one FastAPI app that handles ALL backend domains (auth, cases, documents, PDF generation, email, e‑signature orchestration, AI endpoints) and talks to an external LLM API (e.g., OpenAI).
 ---
 
 ## Big picture (in simple terms)
@@ -12,32 +11,45 @@ We run one FastAPI app that talks to an external LLM API (like OpenAI). No separ
   - Exposes API routes the frontend calls.
   - Calls the external LLM provider when we need AI help (chat, drafting).
 - Redis is our short-term memory for speed (caching and sessions).
-- S3 (or similar) stores files; but PDF rendering is outside Python for now.
+- S3 (or similar) stores files; PDF rendering now happens inside Python (documents module) using a library (e.g., WeasyPrint / ReportLab / xhtml2pdf) and stored results are uploaded.
 
 Think: The frontend asks FastAPI; FastAPI decides what to do; if it needs AI, it calls the LLM API; it saves results and returns a clean answer.
 
 ---
 
-## How we organize the Python code (so it stays clean)
-- app/
-  - main.py (starts the app, wires routers)
-  - routers/
-    - ai.py (endpoints like /api/ai/chat and /api/ai/generate-document)
-    - auth.py, cases.py, documents.py (other app areas)
-  - services/
-    - ai.py (business rules for AI: caching, PII scrubbing, assembling prompts)
-    - cases.py, documents.py, payments.py (core logic)
-  - clients/
-    - llm_client.py (small wrapper to call the external LLM API; handles timeouts/retries)
-  - schemas/
-    - ai.py (Pydantic models for requests/responses)
-    - cases.py, documents.py (data shapes)
-  - core/
-    - config.py (env vars: API keys, URLs, timeouts)
-    - security.py (JWT, role checks)
-  - utils/
-    - cache.py (Redis helpers)
-    - logging.py (structured logs)
+## Current code organization (as implemented now)
+Root directory contains domain packages directly (no top-level app/ package yet):
+
+- main.py (FastAPI entrypoint; includes auth + ai routers)
+- core/
+  - config.py (settings via pydantic-settings)
+  - database.py (SQLAlchemy engine/session + Base)
+  - security.py (JWT + password hashing)
+  - roles.py (enum for user roles)
+  - deps.py (shared dependencies e.g. role guard)
+- models/
+  - user.py (User model)
+- routers/
+  - auth.py (registration/login/me endpoints)
+  - ai.py (skeleton endpoints returning 501)
+- services/
+  - auth.py (user creation, authentication, token logic)
+  - ai.py (skeleton service helpers)
+- schemas/
+  - auth.py (User & Token models)
+  - ai.py (skeleton request/response models)
+- clients/
+  - llm_client.py (skeleton external LLM client)
+- utils/
+  - logging.py (basic logging setup)
+  - cache.py (in-memory placeholder; will become Redis)
+  - hashing.py (stable hashing for cache keys)
+- requirements.txt
+- .env.example
+
+Planned (not yet implemented): documents.py, email.py, esign.py, payments.py, notifications.py, storage_client.py, gov_api_clients/.
+
+We can later introduce an `app/` package and move these modules under it; documentation will be updated then.
 
 Key idea: routers are thin, services hold logic, clients talk to outside APIs.
 
@@ -63,7 +75,7 @@ If the LLM call fails or times out:
 
 ---
 
-## Step-by-step: AI document draft flow
+## Step-by-step: AI document draft + PDF flow
 1) User fills a form (e.g., company details) and clicks “Generate Draft”.
 2) Frontend calls FastAPI: POST /api/ai/generate-document with { type, inputs, tone?, locale? }.
 3) FastAPI validates the payload and checks permissions.
@@ -73,7 +85,7 @@ If the LLM call fails or times out:
 7) Save the draft in the DB as a document draft (metadata, status = "drafted").
 8) Return the draft text (and optional sections) to the frontend.
 
-Note: Converting the draft to a PDF is handled outside Python (in the PHP service). From Python’s perspective, this step ends when the draft is stored and returned.
+After draft creation, if the user requests a PDF immediately: the documents service resolves the template (by templateId + version), injects sanitized data, renders to PDF, uploads to S3, and returns a file URL; metadata is persisted (checksum, size, version).
 
 ---
 
@@ -96,11 +108,23 @@ Note: Converting the draft to a PDF is handled outside Python (in the PHP servic
   - Request: { text: string, policy: string }
   - Response: { findings: object[], riskLevel: "low"|"medium"|"high", suggestions: string[] }
 
-Use Pydantic models in schemas/ai.py to validate these.
+- POST /api/docs/render-pdf
+  - Request: { templateId: string, version: string, data: object, options?: object }
+  - Response: { fileUrl: string, checksum: string, size: number }
+- POST /api/email/send
+  - Request: { to: string[], subject: string, bodyHtml?: string, bodyText?: string, attachments?: [{ filename: string, fileUrl?: string, inline?: boolean }] }
+  - Response: { id: string, status: string }
+- POST /api/esign/initiate
+  - Request: { docId: string, signers: [{ name: string, email: string, order?: int }], workflow: string }
+  - Response: { signingUrl: string, expiresAt: datetime, trackingId: string }
+
+Implemented today:
+- Only auth endpoints are live; ai endpoints return 501 (placeholder).
+- Future endpoints (docs/email/esign) are not yet present in code; their shapes are reserved here for frontend alignment.
 
 ---
 
-## Caching (make repeated answers instant and cut AI costs)
+## Caching (speed + cost control)
 - Use Redis with keys like: ai:chat:{hash(model+prompt+inputs+version)}
 - TTL: 15–60 minutes for chat; maybe longer for stable drafts.
 - Include the model name and our prompt/template version in the hash. If either changes, the cache becomes a miss (good!).
@@ -125,8 +149,12 @@ Use Pydantic models in schemas/ai.py to validate these.
 ---
 
 ## Background tasks (for long work without making users wait)
-- For small background tasks, use FastAPI BackgroundTasks (e.g., save transcript, pre‑warm cache).
-- For heavier work (batch drafting, bulk imports), consider a queue later (Celery/RQ). Not required for MVP.
+- Use FastAPI BackgroundTasks initially for: email sending, PDF post‑processing, cache warm.
+- When volume grows: adopt Celery/RQ/Arq for:
+  - Bulk PDF generation
+  - Batch email / notification fan‑out
+  - Scheduled compliance sync jobs
+  - Async e‑sign status polling
 
 ---
 
@@ -138,12 +166,18 @@ Use Pydantic models in schemas/ai.py to validate these.
 ---
 
 ## Configuration (environment variables you’ll see)
-- LLM_API_KEY: external provider key
-- LLM_MODEL: default model name/version
-- LLM_TIMEOUT_MS: request timeout
-- REDIS_URL: for caching (e.g., redis://localhost:6379/0)
-- DATABASE_URL: SQLAlchemy/MySQL connection string
-- JWT_SECRET, JWT_EXPIRES_IN: auth settings
+- DATABASE_URL (current default sqlite:///./app.db for dev)
+- DATABASE_ECHO (SQLAlchemy echo flag)
+- JWT_SECRET_KEY, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
+- CORS_ALLOW_ORIGINS, CORS_ALLOW_METHODS, CORS_ALLOW_HEADERS
+
+Reserved (planned but not yet used in code):
+- LLM_API_KEY, LLM_MODEL, LLM_TIMEOUT_MS
+- REDIS_URL
+- SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD
+- S3_BUCKET, S3_REGION, S3_ACCESS_KEY, S3_SECRET_KEY
+- ESIGN_API_KEY, ESIGN_PROVIDER_URL
+- PDF_ENGINE
 
 Keep secrets out of code; use environment variables or a secrets manager.
 
@@ -151,12 +185,16 @@ Keep secrets out of code; use environment variables or a secrets manager.
 
 ## Minimal example of the internal layering (pseudo-code)
 
-- routers/ai.py
-  - Receives request → calls services.ai.chat() → returns response
-- services/ai.py
-  - Builds cache key → checks Redis → scrubs PII → calls clients.llm_client → caches result → persists consultation → returns clean response
-- clients/llm_client.py
-  - Calls provider SDK/HTTP with timeouts, retries, idempotency key → returns text or raises a typed error
+Implemented layering (current state):
+routers/auth.py → services.auth (→ database, security)
+routers/ai.py (skeleton) → services.ai (skeleton) → clients.llm_client (skeleton)
+
+Target layering (future):
+routers/ai.py → services.ai → clients.llm_client
+routers/docs.py → services.documents → (pdf renderer + storage client)
+routers/email.py → services.notifications → clients.email_client
+routers/esign.py → services.esign → clients.esign_client
+routers/payments.py → services.payments → clients.payment_client
 
 This keeps responsibilities neat and makes a future split easy.
 
@@ -167,31 +205,39 @@ This keeps responsibilities neat and makes a future split easy.
 - Set env vars for the LLM API key and Redis.
 - Use a .env file in dev (but never commit real secrets).
 
-Example (PowerShell):
+Example (PowerShell) minimal run:
 ```
-$env:LLM_API_KEY = "sk-...";
-$env:REDIS_URL = "redis://localhost:6379/0";
-uvicorn app.main:app --reload --port 8000
+pip install -r requirements.txt
+Copy-Item .env.example .env
+uvicorn main:app --reload --port 8000
+```
+
+Planned future (when ai implemented):
+```
+$env:LLM_API_KEY = "sk-..."
+uvicorn main:app --reload --port 8000
 ```
 
 ---
 
 ## Future split (when/if we outgrow one server)
-- Keep the same public routes (/api/ai/*).
-- Move services/ai.py + clients/llm_client.py into a new AI microservice.
-- Have routers/ai.py call that service instead of the external provider directly.
-- Add Nginx routing and service-to-service auth later.
+- Phase 1: Extract AI (services/ai + clients/llm_client) behind /api/ai (unchanged externally).
+- Phase 2 (optional): Extract documents (PDF heavy load) if rendering cost/latency grows.
+- Phase 3 (optional): Extract notifications for high‑volume email/SMS.
+- Introduce service tokens / mTLS; update Nginx for path‑based routing.
 
 This way, nothing changes for the frontend.
 
 ---
 
 ## Glossary (quick definitions)
-- FastAPI: our Python web framework for building APIs.
-- LLM: Large Language Model — the AI we call to get answers/drafts.
-- Redis: fast in‑memory store used for caching.
-- Cache: a temporary save of answers to return results faster next time.
-- PII: Personally Identifiable Information — data that can identify a person.
+- FastAPI: Python web framework for APIs.
+- LLM: Large Language Model (external provider).
+- Redis: in‑memory store for caching / short‑term data.
+- Cache: temporary stored result for speed and cost savings.
+- PII: Personally Identifiable Information.
+- PDF renderer: library that converts HTML or structured content into PDF.
+- E‑signature: external provider flow for collecting legally binding signatures.
 
 ---
 

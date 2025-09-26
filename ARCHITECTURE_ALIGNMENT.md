@@ -1,77 +1,81 @@
-# Architecture Alignment: Single FastAPI Backend (External LLM API) + PHP (Docs/Email)
+# Architecture Alignment: Single FastAPI Backend (External LLM API) – Unified Services
 
-A clear, shareable overview of the recommended MVP: one FastAPI app that calls an external LLM API (e.g., OpenAI), plus a PHP service for PDFs/email. Clean internal boundaries keep an easy path to split the AI out later if needed.
+A clear, shareable overview of the updated MVP: **one FastAPI application** providing all backend capabilities (auth, roles, cases, AI, documents/PDFs, email, e‑signature orchestration). The AI still calls an external LLM provider through an internal client. All prior PHP responsibilities (PDF generation, email sending, file handling) are now implemented as internal FastAPI modules. Internal boundaries remain clean so the AI layer (or any other vertical like documents) can still be split out later if needed.
 
 ## TL;DR
-- FastAPI is the “orchestra conductor” — all core app logic (auth, roles, cases, payments, gov integrations) and the main REST API.
-- AI is an external provider — FastAPI includes AI endpoints that call the external LLM API via a thin client with timeouts, retries, and caching.
-- PHP Service is the “document shop” — generates PDFs from templates, handles emails, file uploads/downloads, and e‑signature flows.
-- Benefits now: fewer moving parts, faster shipping. Future‑proof: internal AI layer can be split into its own service without breaking the frontend.
+- Single FastAPI app = all core app logic (auth, roles, cases, payments, gov integrations) + AI endpoints + documents/PDF/email/e‑signature.
+- AI remains external (LLM provider); we wrap it with a thin resilient client (timeouts, retries, caching, PII scrubbing).
+- Documents/PDF/email/e‑signature modules moved in‑house (Python libs + background tasks where needed).
+- Benefits: even fewer moving parts, one deployment, still future‑proof via internal modular layering.
 
 ---
 
-## Why this alignment is better (single FastAPI + external LLM)
+## Why this alignment is better (single FastAPI for everything + external LLM)
 
-1) Simpler now, clean split later
-- One deployable app for core features and AI endpoints; fewer moving parts.
-- Keep a dedicated AI module inside FastAPI so you can extract it to a separate service later without changing frontend routes.
+1) Simplest possible operational footprint
+- One deployable artifact; no cross‑service latency or auth between Python and PHP.
+- Modular internal layers (ai, documents, notifications, auth) preserve an easy path to extract later.
 
 2) Security and data minimization
-- FastAPI controls what goes to the model; scrub PII before calling the LLM.
-- Separate secrets: LLM API keys only in the AI client; payment keys only where needed; SMTP/e‑sign keys in PHP.
+- Single place to enforce PII scrubbing before LLM calls.
+- Fine‑grained secret scoping via environment variables (LLM key, SMTP creds, S3/bucket creds, payment keys).
+- No inter‑service network surface for attackers.
 
-3) Productivity with proven tooling
-- FastAPI for APIs/integrations; PHP for PDFs/email with mature libraries.
-- The AI client can switch providers, add caching, or tune prompts without touching business logic.
+3) Productivity with proven Python tooling
+- FastAPI + ecosystem libs handle: PDF (WeasyPrint/ReportLab), email (smtplib/anymail), e‑signature orchestration (API clients), file uploads (Starlette), background tasks (Celery or FastAPI BackgroundTasks initially).
+- AI client easily swaps providers without touching business logic.
 
 4) Reliability and graceful degradation
-- If the LLM is slow/unavailable, FastAPI returns a friendly fallback and can retry/queue; logins and payments still work.
-- If PHP is busy, queue PDF jobs; AI/chat and core APIs remain responsive.
+- LLM slowness isolated behind ai client (timeouts + circuit breaker); rest of app unaffected.
+- Heavy PDF/email jobs can be queued (future Celery/RQ) while core request/response stays fast.
 
 ---
 
 ## Who does what (at a glance)
 - FastAPI (Single Backend)
   - AuthN/AuthZ (JWT), roles (Client/Lawyer/Admin)
-  - Cases, documents metadata, payments/subscriptions
+  - Cases, documents (metadata + PDF generation), payments/subscriptions
   - Government API integrations (SEC/DTI/BSP)
-  - AI endpoints that call the external LLM API via an internal AI module
-  - Source of truth for records in MySQL
-- AI module inside FastAPI
-  - Chat Q&A, document drafting, analysis (by calling the external LLM provider)
-  - Caching, timeouts, retries, prompt assembly, and PII scrubbing
-- PHP Service (Documents/Email)
-  - PDF generation from templates
-  - Email sending and attachments
-  - File upload/download; e‑signature integration
+  - AI endpoints that call external LLM (chat, drafting, analysis)
+  - Email + notification sending (SMTP/API)
+  - E‑signature orchestration (calls external provider API)
+  - Source of truth (MySQL)
+- AI module (internal package)
+  - Chat Q&A, document drafting, analysis
+  - Caching, timeouts, retries, prompt assembly, PII scrubbing
+- Documents module
+  - Template management & versioning
+  - PDF generation (WeasyPrint/ReportLab or similar)
+  - Storage to S3 (uploads, generated PDFs, templates)
+- Notifications module
+  - Email sending & attachments
+  - Future: SMS / webhook events
 - Storage
   - MySQL: long‑term records (users, cases, documents, consultations, payments, compliance, assignments, filings)
-  - Redis: sessions and caching (short‑term memory)
+  - Redis: sessions + caching (short‑term memory)
   - S3: files (PDFs, templates, uploads, backups)
-- API Gateway (Nginx)
-  - Option A: Route all /api/* to FastAPI; FastAPI calls PHP internally.
-  - Option B: Route /api/docs → PHP and the rest → FastAPI.
+- API Gateway (Nginx) (optional)
+  - Route all /api/* to FastAPI (simple MVP); add CDN caching for static assets later.
 
 ---
 
 ## How requests flow (simple examples)
 
 1) AI chat
-- Frontend → Nginx → FastAPI (/api/ai/chat)
-- FastAPI (AI module) checks Redis cache; if miss, calls the external LLM API; stores consultation via FastAPI in MySQL
-- FastAPI returns the answer to the frontend
+- Frontend → (Nginx) → FastAPI (/api/ai/chat)
+- AI module checks Redis cache; on miss calls external LLM; stores consultation in MySQL
+- FastAPI returns answer
 
-2) Generate a document
-- Frontend → FastAPI with form data
-- FastAPI → external LLM API to draft text
-- FastAPI → PHP to render PDF (template + data)
-- PHP → S3 to store; returns file URL to FastAPI
-- FastAPI → save document record; return download link
+2) Generate a document (draft + PDF)
+- Frontend → FastAPI: form data
+- FastAPI AI module → external LLM: draft text
+- Documents module renders PDF directly (Python lib)
+- Stores PDF to S3 → saves document record in MySQL → returns download link
 
 3) Case lifecycle
-- FastAPI creates/updates the case in MySQL
-- AI module (via external LLM) helps draft required sections
-- PHP generates PDFs and stores in S3
+- FastAPI manages case records
+- AI drafts sections
+- Documents module generates & updates PDFs; stores to S3
 - Lawyer reviews/approves via FastAPI endpoints
 - FastAPI submits to government APIs
 
@@ -96,7 +100,7 @@ Rules:
 - PII scrubbing happens in FastAPI before external LLM calls.
 - Timeouts, retries with idempotency keys; cache by input hash in Redis.
 
-### FastAPI ↔ PHP (Docs/Email/E‑Sign)
+### Internal Modules (Documents / Notifications / E‑Sign)
 - POST /api/docs/render-pdf
   - Request: { templateId, version, data, options? }
   - Response: { fileUrl, checksum, size }
@@ -108,9 +112,9 @@ Rules:
   - Response: { signingUrl, expiresAt, trackingId }
 
 Rules:
-- Files stored in S3; PHP returns URLs.
-- Templates are versioned (templateId + version) to avoid silent changes.
-- Strict input validation at PHP; FastAPI remains the record keeper in MySQL.
+- Files stored in S3; service returns URLs.
+- Templates versioned (templateId + version).
+- Strict validation at the FastAPI layer; consistent audit logging.
 
 ### FastAPI AI module ↔ External LLM API (internal client)
 - Use the provider’s SDK/HTTP with:
@@ -122,61 +126,62 @@ Rules:
 ---
 
 ## Scaling and fault isolation
-- Scale FastAPI replicas as overall traffic grows; add DB read replicas if needed.
-- Use Redis caching to reduce repeated LLM calls.
-- Scale PHP workers for batch PDF generation or email bursts.
-- If LLM provider is slow/unavailable, trip a circuit breaker, return a friendly message, and retry later.
-- If PHP is slow, queue PDF jobs; keep APIs responsive.
+- Scale FastAPI replicas horizontally; add DB read replicas as needed.
+- Redis reduces repeated LLM & document re-generation.
+- Introduce a task queue for heavy PDF/email bursts when volume grows.
+- Circuit breaker around LLM: fallback responses on provider slowness.
+- Backpressure strategy for PDF/email: enqueue & poll / status endpoints.
 
 ---
 
 ## Security model (practical guardrails)
-- JWT for user auth; enforce role‑based access (Client/Lawyer/Admin) in FastAPI.
-- Separate secrets per component: LLM API keys in the AI client; payments in FastAPI; SMTP/e‑sign in PHP.
-- Validate and sanitize all inputs; scrub PII before AI calls.
-- Rate limiting and circuit breakers for external calls (AI, email, gov APIs).
-- Optional IP allowlists/mTLS if FastAPI talks to PHP over a private network.
+- JWT auth + role‑based access (Client/Lawyer/Admin) via dependencies.
+- Separate env vars / secret scopes: LLM, DB, Redis, SMTP, S3, payment, e‑sign.
+- PII scrubbing before AI calls; minimize logged data.
+- Rate limiting & circuit breakers for external calls (LLM, e‑sign, payments, gov APIs).
+- Template & document integrity: checksum + versioning.
 
 ---
 
 ## Team & development benefits
-- Single FastAPI repo for core app + AI endpoints; optional separate PHP repo for docs/email.
-- Clear internal layering in FastAPI keeps the split cheap later:
-  - routers/ai.py (HTTP endpoints)
-  - services/ai.py (business logic, PII scrubbing)
-  - clients/llm_client.py (external LLM API calls)
-  - utils/cache.py (Redis)
-- Faster iteration now; future split is mostly moving the AI layer behind a private URL.
+- One tech stack (Python) simplifies onboarding & tooling.
+- Clear internal layering keeps future extraction cheap:
+  - routers/ (ai, documents, email, auth, cases)
+  - services/ (ai, documents, notifications, cases, payments)
+  - clients/ (llm_client, email_client?, esign_client, gov_apis)
+  - utils/ (cache, logging, hashing)
+- Future split: extract only ai or documents modules behind internal HTTP/RPC.
 
 ---
 
-## Migration path (from single FastAPI to split AI later)
-1) Keep frontend routes stable (/api/ai/*).
-2) Extract services/ai.py and clients/llm_client.py into a new AI microservice.
-3) Update ai router to call the new AI service instead of the external provider directly.
-4) Add Nginx route: /api/ai → AI service; keep /api/data → FastAPI; /api/docs → PHP (optional).
-5) Tighten security between services (token scopes, IP allowlists, per‑service secrets).
+## Migration path (optional future splits)
+1) Keep public routes stable (/api/ai/*, /api/docs/*, /api/email/*).
+2) Extract ai module (services/ai.py + clients/llm_client.py) → dedicated AI service.
+3) (Later) Extract documents & notifications if scaling / specialization required.
+4) Introduce internal service tokens + stricter network policies.
+5) Update Nginx: route /api/ai → AI service; others remain on core API.
 
 ---
 
 ## Next steps (checklist)
-- Confirm single‑server MVP: FastAPI (core + AI endpoints) + PHP (docs/email).
-- Define AI module boundaries and schemas so extraction later is painless.
-- Decide initial templates and required data fields; version templates.
-- Add guardrails: timeouts, retries, idempotency, Redis caching for AI.
-- Secrets management per component; no hardcoded credentials.
-- Monitoring and logging: latency, error rates, cache hit rates, external LLM status.
+- Confirm single‑server MVP scope (core + AI + documents + email + e‑sign) in FastAPI.
+- Define & implement Pydantic schemas for AI, documents, email, e‑sign.
+- Select PDF generation library (e.g., WeasyPrint) & finalize template versioning strategy.
+- Implement AI guardrails: timeouts, retries, idempotency keys, Redis caching.
+- Add circuit breaker & structured logging (latency, errors, cache hits, token usage).
+- Set up secrets management (.env for dev; vault/secret store for prod).
+- Add minimal background task mechanism (FastAPI BackgroundTasks) for email/PDF if needed.
+- Prepare metrics dashboard (LLM latency, cache hit %, PDF generation time).
 
 ---
 
 ## “Day in the life” of a request (example)
 - User clicks “Generate Incorporation PDF”.
   1) Frontend → FastAPI: submit company details.
-  2) FastAPI (AI module) → external LLM API: draft the legal text.
-  3) FastAPI receives draft; optionally caches and stores a consultation record.
-  4) FastAPI → PHP: render PDF using template T + data.
-  5) PHP → S3: store PDF; return file URL.
-  6) FastAPI → MySQL: save document record; update case.
-  7) FastAPI → Frontend: show download link.
+  2) AI module → external LLM: draft legal text.
+  3) AI response cached (Redis) + stored as draft record.
+  4) Documents module renders PDF → stores in S3.
+  5) FastAPI updates case + document metadata in MySQL.
+  6) FastAPI returns download link & draft ID.
 
-This alignment ships quickly with one backend app, protects sensitive data, and keeps a clear path to split the AI into its own service when scale or compliance requires it.
+This alignment ships even faster with a single backend, protects sensitive data, and preserves a clean path to split AI or documents into separate services when scale or compliance requires it.
