@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.config import get_settings
-from db.database import Base, engine
+from db.connection import Base, engine
 from utils.logging import configure_logging, logger
 from routers import auth
 from routers import ai  # noqa: F401  (ensures router file is discovered)

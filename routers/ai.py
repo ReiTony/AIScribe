@@ -25,4 +25,4 @@ async def generate_document_endpoint():  # type: ignore[empty-body]
 
 @router.post("/analyze")
 async def analyze_endpoint():  # type: ignore[empty-body]
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="AI analysis not yet implemented")tite
+    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="AI analysis not yet implemented")
