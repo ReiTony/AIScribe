@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
 from core.config import get_settings
-from db.database import get_db
+from db.connection import get_db
 from models import User
 from schemas.auth import Token, UserCreate, UserRead
 from services import auth as auth_service

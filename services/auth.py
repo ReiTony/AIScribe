@@ -6,7 +6,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
 from core.config import get_settings
-from db.database import get_db
+from db.connection import get_db
 from core.security import (
     create_access_token,
     decode_access_token,
