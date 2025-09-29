@@ -1,12 +1,18 @@
-"""AI endpoints (skeleton).
 
-These are placeholders aligned with the architecture docs. They will be implemented
-once AI features are prioritized. For now they return 501 to signal unimplemented.
-"""
 from fastapi import APIRouter, Depends, HTTPException, status
-
+import json
 from core.config import get_settings
 from services import ai as ai_service  # type: ignore  # placeholder until implemented
+import os
+from dotenv import load_dotenv
+
+from google import genai
+from google.genai import types
+
+load_dotenv()
+API_KEY = os.getenv("GEMINI_API_KEY")
+client = genai.Client(api_key=API_KEY)
+
 
 settings = get_settings()
 
@@ -14,9 +20,27 @@ router = APIRouter(prefix=f"{settings.api_prefix}/ai", tags=["ai"])
 
 
 @router.post("/chat")
-async def chat_endpoint():  # type: ignore[empty-body]
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="AI chat not yet implemented")
+async def chat_endpoint(promt: str):  
+    try:
+        response = client.models.generate_content(
+        model="gemini-2.5-flash-lite",
+        contents=promt,
+        config=types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(thinking_budget=0) # Disables thinking
+        ),
+    )
+        success_response = {
+            "status": "success",
+            "data": {
+                "response": response
+            }
+        }
 
+        return success_response
+        
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    
 
 @router.post("/generate-document")
 async def generate_document_endpoint():  # type: ignore[empty-body]
@@ -25,4 +49,4 @@ async def generate_document_endpoint():  # type: ignore[empty-body]
 
 @router.post("/analyze")
 async def analyze_endpoint():  # type: ignore[empty-body]
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="AI analysis not yet implemented") pogi ni james
+    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="AI analysis not yet implemented")
