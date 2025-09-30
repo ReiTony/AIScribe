@@ -5,6 +5,8 @@ from pydantic import BaseModel
 
 from fastapi import APIRouter, HTTPException, Depends
 from motor.motor_asyncio import AsyncIOMotorClient
+from llm.legal_prompt import system_instruction
+from llm.llm_client import generate_response
 from db.connection import get_db
 from utils.encryption import get_current_user, get_current_user_optional
 
@@ -27,31 +29,21 @@ class ChatHistory(BaseModel):
 def get_chat_collection(db: AsyncIOMotorClient):
     return db["legalchat_histories"]
 
-@router.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(
-    chat_message: ChatMessage,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorClient = Depends(get_db)
-):
-    """
-    Protected chat endpoint that requires JWT authentication.
-    """
+@router.post("/chat")
+async def chat_endpoint(message: str, db: AsyncIOMotorClient = Depends(get_db)):
     try:
-        timestamp = datetime.now(timezone.utc)
-        chat_data = {
-            "username": current_user["username"],
-            "message": chat_message.message,
-            "timestamp": timestamp,
-            "response": f"Hello {current_user['username']}, I received your message: {chat_message.message}"
-        }
-        
-        await get_chat_collection(db).insert_one(chat_data)
-        
-        return ChatResponse(
-            response=chat_data["response"],
-            timestamp=timestamp,
-            username=current_user["username"]
-        )
+        await get_chat_collection(db).insert_one({"message": message})
+        persona = system_instruction("lawyer")
+        logger.info(f"Using persona instruction: {persona}")
+        generate = await generate_response(message, persona)
+        logger.info(f"Generated response: {generate}")
+        try:
+            generate_data = generate.get("data", {})
+            response_content = generate_data.get("response", "")
+            return {"response": response_content}
+        except Exception as e:
+            logger.error(f"Error extracting response content: {e}")
+        return {"response": f"Received message: {message}"}
     except Exception as e:
         logger.error(f"Error in chat_endpoint: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
