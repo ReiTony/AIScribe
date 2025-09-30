@@ -3,12 +3,12 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from decouple import config
- 
+
+
 # Routers
 from routers.auth_route import router as auth_router
 from routers.chat_route import router as chat_router
- 
+
 # Logging Configuration
 logging.basicConfig(
     level=logging.INFO,
@@ -33,10 +33,9 @@ app = FastAPI(
 )
  
 # Middleware
-ALLOWED_ORIGINS = config("ALLOWED_ORIGINS", default="*").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -44,8 +43,9 @@ app.add_middleware(
  
 # Routers
 app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
-app.include_router(chat_router, prefix="/chat", tags=["Chat"])
- 
+
+app.include_router(chat_router, prefix="/api", tags=["Chat"])
+
 # Health & Root Endpoints
 @app.get("/health", tags=["System"], summary="Health Check")
 async def health_check():
