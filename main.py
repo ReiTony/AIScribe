@@ -1,40 +1,57 @@
+import logging
+
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from decouple import config
 
-from core.config import get_settings
-from db.connection import Base, engine
-from utils.logging import configure_logging, logger
-from routers import auth
-from routers import ai  # noqa: F401  (ensures router file is discovered)
+# Routers
+from routers.auth_route import router as auth_router
 
-settings = get_settings()
+# Logging Configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+)
+logger = logging.getLogger("legal_genie")
 
+# Lifespan Events (Startup/Shutdown)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Starting up Legal Genie API...")
+    yield
+    logger.info("Shutting down Legal Genie API...")
+
+
+# FastAPI App Setup
 app = FastAPI(
-	title=settings.app_name,
-	docs_url=settings.docs_url,
-	redoc_url=settings.redoc_url,
+    title="Legal Genie",
+    description="AI-powered legal assistance API.",
+    version="1.0.0",
+    lifespan=lifespan,
 )
 
+# Middleware
+ALLOWED_ORIGINS = config("ALLOWED_ORIGINS", default="*").split(",")
 app.add_middleware(
-	CORSMiddleware,
-	allow_origins=settings.cors_allow_origins,
-	allow_credentials=settings.cors_allow_credentials,
-	allow_methods=settings.cors_allow_methods,
-	allow_headers=settings.cors_allow_headers,
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
+# Routers
+app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
 
-@app.on_event("startup")
-def on_startup() -> None:
-	configure_logging()
-	logger.info("Starting application; ensuring database schema is present (development mode).")
-	Base.metadata.create_all(bind=engine)
+# Health & Root Endpoints
+@app.get("/health", tags=["System"], summary="Health Check")
+async def health_check():
+    """Check if the API is healthy and running."""
+    logger.info("Health check requested")
+    return {"status": "ok"}
 
-
-@app.get("/health", tags=["health"])
-def health_check() -> dict[str, str]:
-	return {"status": "ok"}
-
-
-app.include_router(auth.router)
-app.include_router(ai.router)
+@app.get("/", tags=["Root"], summary="API Root")
+async def root():
+    """Welcome message and basic info."""
+    return {"message": "Welcome to Legal Genie API"}
