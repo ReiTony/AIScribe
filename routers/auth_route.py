@@ -87,7 +87,6 @@ async def refresh_access_token(request: RefreshTokenRequest):
                 headers={"WWW-Authenticate": "Bearer"},
             )
         
-        # Check if it's actually a refresh token
         if payload.get("type") != "refresh":
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,

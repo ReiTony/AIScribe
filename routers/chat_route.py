@@ -1,56 +1,57 @@
 import logging
+
 from datetime import datetime, timezone
 from typing import List, Optional
 from pydantic import BaseModel
-
 from fastapi import APIRouter, HTTPException, Depends
 from motor.motor_asyncio import AsyncIOMotorClient
+
+# Local Imports
 from db.connection import get_db
 from utils.encryption import get_current_user, get_current_user_optional
+from llm.llm_client import generate_response, system_instruction
+from models.chat_schema import ChatMessageHistory, ChatHistory, ChatMessage
 
 router = APIRouter()
 logger = logging.getLogger("ChatRouter")
 
-# Chat models
-class ChatMessage(BaseModel):
-    message: str
-
-class ChatResponse(BaseModel):
-    response: str
-    timestamp: datetime
-    username: str
-
-class ChatHistory(BaseModel):
-    messages: List[dict]
-    total_count: int
-
 def get_chat_collection(db: AsyncIOMotorClient):
     return db["legalchat_histories"]
 
-@router.post("/chat", response_model=ChatResponse)
+@router.post("/chat", response_model=ChatMessageHistory)
 async def chat_endpoint(
     chat_message: ChatMessage,
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorClient = Depends(get_db)
 ):
-    """
-    Protected chat endpoint that requires JWT authentication.
-    """
     try:
         timestamp = datetime.now(timezone.utc)
-        chat_data = {
+
+        user_entry = {
             "username": current_user["username"],
+            "role": "user",
             "message": chat_message.message,
             "timestamp": timestamp,
-            "response": f"Hello {current_user['username']}, I received your message: {chat_message.message}"
         }
-        
-        await get_chat_collection(db).insert_one(chat_data)
-        
-        return ChatResponse(
-            response=chat_data["response"],
-            timestamp=timestamp,
-            username=current_user["username"]
+        await get_chat_collection(db).insert_one(user_entry)
+
+        persona = system_instruction("lawyer")
+        logger.info(f"Using persona instruction: {persona}")
+        generate = await generate_response(chat_message.message, persona)
+        response_content = generate.get("data", {}).get("response", "")
+
+        assistant_entry = {
+            "username": current_user["username"],
+            "role": "assistant",
+            "response": response_content,
+            "timestamp": timestamp,
+        }
+        await get_chat_collection(db).insert_one(assistant_entry)
+
+        return ChatMessageHistory(
+            role="assistant",
+            content=response_content,
+            timestamp=timestamp
         )
     except Exception as e:
         logger.error(f"Error in chat_endpoint: {e}")
@@ -63,33 +64,49 @@ async def get_chat_history(
     limit: int = 50,
     skip: int = 0
 ):
-    """
-    Get chat history for the authenticated user.
-    """
     try:
         chat_collection = get_chat_collection(db)
-        
-        # Get user's chat history
-        cursor = chat_collection.find(
+
+        cursor = (
+            chat_collection.find({"username": current_user["username"]})
+            .sort("timestamp", -1)
+            .skip(skip)
+            .limit(limit)
+        )
+
+        records = await cursor.to_list(length=limit)
+        total_count = await chat_collection.count_documents(
             {"username": current_user["username"]}
-        ).sort("timestamp", -1).skip(skip).limit(limit)
-        
-        messages = await cursor.to_list(length=limit)
-        
-        # Get total count
-        total_count = await chat_collection.count_documents({"username": current_user["username"]})
-        
-        # Convert ObjectId to string for JSON serialization
-        for message in messages:
-            message["_id"] = str(message["_id"])
-        
+        )
+
+        conversation = []
+
+        for record in records:
+            if "message" in record:
+                conversation.append(ChatMessageHistory(
+                    role="user",
+                    content=record["message"],
+                    timestamp=record["timestamp"]
+                ))
+
+            if "response" in record:
+                conversation.append(ChatMessageHistory(
+                    role="assistant",
+                    content=record["response"],
+                    timestamp=record["timestamp"]
+                ))
+
+        conversation.sort(key=lambda x: x.timestamp)
+
         return ChatHistory(
-            messages=messages,
+            messages=conversation,
             total_count=total_count
         )
+
     except Exception as e:
         logger.error(f"Error in get_chat_history: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
+
 
 @router.get("/public-info")
 async def public_endpoint():
