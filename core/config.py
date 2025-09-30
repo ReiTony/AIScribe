@@ -10,7 +10,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    app_name: str = Field(default="LegalGene API", alias="APP_NAME")
+    app_name: str = Field(default="LegalGenie API", alias="APP_NAME")
     environment: Literal["development", "staging", "production"] = Field(default="development", alias="ENVIRONMENT")
     database_url: str = Field(default="sqlite:///./app.db", alias="DATABASE_URL")
     database_echo: bool = Field(default=False, alias="DATABASE_ECHO")
