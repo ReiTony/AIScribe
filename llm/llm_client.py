@@ -27,8 +27,8 @@ async def generate_response(prompt: str, persona: str):
         ),
     ],
         config = types.GenerateContentConfig(
-            max_output_tokens=1500,
-            temperature=0.5,
+            max_output_tokens=2500,
+            temperature=0.2,
             thinking_config = types.ThinkingConfig(
                 thinking_budget=0, #set to 1 for thinking mode.
             ),
@@ -40,7 +40,7 @@ async def generate_response(prompt: str, persona: str):
         success_response = {
             "status": "success",
             "data": {
-                "response": response
+                "response": response.text
             }
         }
 
