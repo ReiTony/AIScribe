@@ -1,57 +1,68 @@
-# Python Backend Workflow: FastAPI (All Services) + External LLM (Single Server)
+# Python Backend Workflow: FastAPI (All Services) + Google Gemini LLM (Single Server)
 
 This document explains, in plain language, how our Python side works end-to-end.
-We run one FastAPI app that handles ALL backend domains (auth, cases, documents, PDF generation, email, e‑signature orchestration, AI endpoints) and talks to an external LLM API (e.g., OpenAI).
+We run one FastAPI app that handles ALL backend domains (auth, chat, document generation) and talks to Google Gemini 2.5 Flash Lite API.
 ---
 
 ## Big picture (in simple terms)
-- FastAPI is our main app. It:
-  - Handles logins, permissions, and user actions.
-  - Stores and reads data from the database (MySQL).
+- **FastAPI** is our main app. It:
+  - Handles user registration, login, and JWT authentication.
+  - Stores and reads data from MongoDB (via Motor async driver).
   - Exposes API routes the frontend calls.
-  - Calls the external LLM provider when we need AI help (chat, drafting).
-- Redis is our short-term memory for speed (caching and sessions).
-- S3 (or similar) stores files; PDF rendering now happens inside Python (documents module) using a library (e.g., WeasyPrint / ReportLab / xhtml2pdf) and stored results are uploaded.
+  - Calls Google Gemini API when we need AI help (chat, document drafting).
+- **MongoDB** is our database for users, chat histories, and document generation records.
+- **Google Gemini 2.5 Flash Lite** is our LLM provider for AI-powered legal assistance.
 
-Think: The frontend asks FastAPI; FastAPI decides what to do; if it needs AI, it calls the LLM API; it saves results and returns a clean answer.
+Think: The frontend asks FastAPI; FastAPI decides what to do; if it needs AI, it calls Gemini API; it saves results and returns a clean answer.
 
 ---
 
-## Current code organization (as implemented now)
-Root directory contains domain packages directly (no top-level app/ package yet):
+## Current code organization (as implemented)
+Root directory structure:
 
-- main.py (FastAPI entrypoint; includes auth + ai routers)
-- core/
-  - config.py (settings via pydantic-settings)
-  - database.py (SQLAlchemy engine/session + Base)
-  - security.py (JWT + password hashing)
-  - roles.py (enum for user roles)
-  - deps.py (shared dependencies e.g. role guard)
-- models/
-  - user.py (User model)
-- routers/
-  - auth.py (registration/login/me endpoints)
-  - ai.py (skeleton endpoints returning 501)
-- services/
-  - auth.py (user creation, authentication, token logic)
-  - ai.py (skeleton service helpers)
-- schemas/
-  - auth.py (User & Token models)
-  - ai.py (skeleton request/response models)
-- clients/
-  - llm_client.py (skeleton external LLM client)
-- utils/
-  - logging.py (basic logging setup)
-  - cache.py (in-memory placeholder; will become Redis)
-  - hashing.py (stable hashing for cache keys)
-- requirements.txt
-- .env.example
+**Core Application:**
+- `main.py` - FastAPI entrypoint with CORS, health check, includes all routers
+  - Auth router (`/auth`)
+  - Chat router (`/api/chat`)
+  - Document generation router (`/api/generate-document`)
 
-Planned (not yet implemented): documents.py, email.py, esign.py, payments.py, notifications.py, storage_client.py, gov_api_clients/.
+**Database Layer:**
+- `db/`
+  - `connection.py` - MongoDB connection via Motor (async), provides `get_db()` dependency
 
-We can later introduce an `app/` package and move these modules under it; documentation will be updated then.
+**Models (Pydantic Schemas):**
+- `models/`
+  - `auth_schema.py` - RegisterRequest, LoginRequest, TokenResponse, UserResponse, etc.
+  - `chat_schema.py` - ChatMessage, ChatResponse, ChatHistory
+- `schemas/`
+  - `demand_letter.py` - DemandLetterData with nested models (BasicInfo, SenderInfo, RecipientInfo, DemandInfo, LegalBasis, Demands, etc.)
 
-Key idea: routers are thin, services hold logic, clients talk to outside APIs.
+**Routers (API Endpoints):**
+- `routers/`
+  - `auth_route.py` - Registration, login, token refresh, validation, user info, logout
+  - `chat_route.py` - Chat endpoint, chat history, protected/public endpoints
+  - `generate_doc.py` - Document generation endpoint for demand letters
+
+**LLM Integration:**
+- `llm/`
+  - `llm_client.py` - Google Gemini 2.5 Flash Lite integration with `generate_response()` function
+  - `legal_prompt.py` - System instruction templates and document enhancement prompts
+
+**Utilities:**
+- `utils/`
+  - `encryption.py` - Password hashing (bcrypt), JWT authentication dependencies
+  - `jwt_handler.py` - JWT token creation/verification, access & refresh tokens
+  - `logging.py` - Logging configuration
+
+**Dependencies:**
+- `requirements.txt` - FastAPI, Motor (MongoDB async), PyMongo, bcrypt, python-jose, pydantic, google-genai, etc.
+
+**Key Architecture Decisions:**
+- MongoDB for all data storage (users, chat histories, document records)
+- JWT-based authentication with access tokens (30 min) and refresh tokens (7 days)
+- Direct Google Gemini API integration (no caching yet)
+- Async/await throughout for non-blocking operations
+- Pydantic models with camelCase aliases for frontend compatibility
 
 ---
 
