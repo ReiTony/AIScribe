@@ -1,7 +1,6 @@
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional
-from pydantic import BaseModel
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -9,22 +8,10 @@ from llm.legal_prompt import system_instruction
 from llm.llm_client import generate_response
 from db.connection import get_db
 from utils.encryption import get_current_user, get_current_user_optional
+from models.chat_schema import ChatMessage, ChatResponse, ChatHistory
 
 router = APIRouter()
 logger = logging.getLogger("ChatRouter")
-
-# Chat models
-class ChatMessage(BaseModel):
-    message: str
-
-class ChatResponse(BaseModel):
-    response: str
-    timestamp: datetime
-    username: str
-
-class ChatHistory(BaseModel):
-    messages: List[dict]
-    total_count: int
 
 def get_chat_collection(db: AsyncIOMotorClient):
     return db["legalchat_histories"]
