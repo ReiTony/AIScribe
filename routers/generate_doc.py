@@ -4,7 +4,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from llm.legal_prompt import system_instruction, generate_doc_prompt
 from llm.llm_client import generate_response
 from db.connection import get_db
-from schemas.demand_letter import DemandLetterData
+from models.demand_letter import DemandLetterData
 from datetime import datetime, timezone
 
 
