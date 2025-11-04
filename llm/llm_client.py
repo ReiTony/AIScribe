@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 import json
 import os
 from dotenv import load_dotenv
-from llm.legal_prompt import system_instruction
+from llm.generate_doc_prompt import system_instruction
 
 from google import genai
 from google.genai import types

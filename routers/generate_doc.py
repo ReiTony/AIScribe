@@ -1,7 +1,7 @@
 import logging
 from fastapi import APIRouter, HTTPException, Depends
 from motor.motor_asyncio import AsyncIOMotorClient
-from llm.legal_prompt import system_instruction, prompt_for_DemandLetter
+from llm.generate_doc_prompt import system_instruction, prompt_for_DemandLetter
 from llm.llm_client import generate_response
 from db.connection import get_db
 from models.demand_letter import DemandLetterData

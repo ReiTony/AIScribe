@@ -1,12 +1,60 @@
 from models.demand_letter import DemandLetterData
+from typing import Dict, Optional
 
 def system_instruction(persona: str) -> str:
     instructions = {
-        "lawyer": "You are a highly knowledgeable and experienced lawyer. Provide clear, concise, and accurate legal advice.",
+        "lawyer": """You are a highly knowledgeable and experienced lawyer specializing in Philippine law. 
+Provide clear, concise, and accurate legal advice. When discussing legal matters, reference relevant 
+Philippine laws and regulations. Maintain a professional yet approachable tone.""",
         "paralegal": "You are a diligent and detail-oriented paralegal. Assist with legal research and document preparation.",
         "legal_assistant": "You are a friendly and efficient legal assistant. Help with scheduling and client communication.",
     }
     return instructions.get(persona.lower(), "You are a helpful assistant. Provide accurate and relevant information.")
+
+
+def conversational_document_prompt(
+    user_message: str,
+    document_type: str,
+    extracted_info: Optional[Dict] = None,
+    chat_history: Optional[str] = None
+) -> str:
+    """
+    Build a prompt for generating documents from conversational input.
+    
+    Args:
+        user_message: The user's original message
+        document_type: Type of document to generate
+        extracted_info: Any information extracted from the message
+        chat_history: Previous conversation context
+        
+    Returns:
+        Formatted prompt for document generation
+    """
+    context = ""
+    if chat_history:
+        context = f"\n\nPrevious conversation:\n{chat_history}\n"
+    
+    info_section = ""
+    if extracted_info and len(extracted_info) > 0:
+        info_section = "\n\nExtracted information:\n"
+        for key, value in extracted_info.items():
+            info_section += f"- {key}: {value}\n"
+    
+    prompt = f"""You are a Philippine legal document expert. Generate a professional {document_type} based on the following information.
+
+User's request: "{user_message}"{context}{info_section}
+
+Instructions:
+1. Generate a complete, professional {document_type} following Philippine legal standards
+2. Use formal legal language appropriate for {document_type}
+3. Include all necessary sections and clauses
+4. If any critical information is missing, clearly indicate [MISSING: description] in the document
+5. Format the document properly with headers, sections, and proper spacing
+6. Ensure compliance with Philippine legal requirements
+
+Generate the document now:"""
+    
+    return prompt.strip()
 
 def generate_doc_prompt(details: str, doc_type: str, enhance_lvl: str) -> str:
     prompt = f"""
