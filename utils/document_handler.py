@@ -4,6 +4,9 @@ from pydantic import BaseModel
 from models.documents import ALL_SCHEMAS 
 from llm.generate_doc_prompt import system_instruction
 from llm.llm_client import generate_response
+import logging
+
+logger = logging.getLogger("DocumentHandler")
 
 
 DOCUMENT_KEYWORDS = {
@@ -116,6 +119,7 @@ async def extract_and_validate_document_data(
         extraction_result = await generate_response(extraction_prompt, persona)
         response_text = extraction_result.get("data", {}).get("response", "")
         
+        logger.info(f"\n===========\nExtraction response: \n {response_text}\n===========\n")
         # Clean up the response in case the LLM adds markdown backticks
         cleaned_json_str = response_text.strip().replace("```json", "").replace("```", "").strip()
         

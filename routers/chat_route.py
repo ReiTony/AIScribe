@@ -62,7 +62,7 @@ async def chat_endpoint(
         username = current_user.get("username") if current_user else "anonymous"
         message = request.message
         
-        logger.info(f"Processing chat from {username}: {message[:100]}...")
+        logger.info(f"\nProcessing chat from {username}: \n{message}\n")
         
         history_docs = await get_user_chat_history(db, username, limit=5)
         history_text = format_chat_history(history_docs)
