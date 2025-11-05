@@ -1,7 +1,3 @@
-"""
-Consultant Prompt Templates for Philippine Law Consultation
-Specialized system instructions for legal consultation chat.
-"""
 
 def get_philippine_law_consultant_prompt() -> str:
     """

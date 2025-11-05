@@ -1,102 +1,123 @@
-"""
-Intent Detection Utility
-Lightweight utility to detect user intent and route to appropriate handlers.
-"""
-
+import json
 import logging
 import re
 from typing import Dict, Optional
 from llm.llm_client import generate_response
 from llm.consultant_prompt import get_intent_classification_instruction
+from llm.generate_doc_prompt import system_instruction
+from models.documents import ALL_SCHEMAS
 
 logger = logging.getLogger("IntentDetector")
 
+DEFAULT_INTENT = {
+    "intent": "consultation",
+    "document_type": None,
+    "confidence": 0.3,
+    "needs_consultation": True,
+    "needs_document": False,
+}
 
 async def detect_intent(message: str, chat_history: Optional[str] = None) -> Dict:
     """
-    Detect user intent from message using LLM.
-    
-    Returns:
-        Dict with:
-        - intent_type: "consultation" | "document_generation" | "both"
-        - document_type: type of document if applicable
-        - confidence: confidence score
-        - needs_consultation: boolean
-        - needs_document: boolean
+    Detects user intent using an LLM, instructing it to return a structured JSON response.
+
+    This function classifies the user's message into one of four categories:
+    - consultation: The user is asking for legal advice or information.
+    - document_generation: The user explicitly wants to create a legal document.
+    - hybrid: The user's request involves both consultation and document generation.
+    - general_conversation: The user is engaging in non-legal small talk (greetings, thanks, etc.).
+
+    Returns a dictionary with the classified intent and associated details.
     """
     
-    # Build context
-    context = f"\nRecent conversation context:\n{chat_history}" if chat_history else ""
-    
-    intent_prompt = f"""Analyze this user message and determine their intent.
+    # Dynamically get the list of supported document types from your schema registry
+    available_documents = list(ALL_SCHEMAS.keys())
+    document_list_str = ", ".join(available_documents)
 
-User message: "{message}"{context}
+    # The persona/system prompt sets the stage for the LLM's task
+    persona = system_instruction(
+        "You are a precise intent classification engine. Your sole purpose is to analyze a user's message "
+        "and respond with a JSON object that categorizes their intent. Do not add any explanatory text, "
+        "just the raw JSON."
+    )
 
-Classify the intent as one of:
-1. CONSULTATION - User wants legal advice, explanation, or guidance
-2. DOCUMENT_GENERATION - User wants to create/generate a legal document
-3. BOTH - User wants both advice AND document generation
-4. DOCUMENT_INFO_GATHERING - User is providing information in response to document request
+    # The user prompt contains the instructions, message, and examples (few-shot learning)
+    intent_prompt = f"""
+    Analyze the user's message below, considering the recent chat history for context. Classify the intent and identify any requested document types.
 
-If document generation is involved, identify the document type:
-- demand_letter, contract, affidavit, complaint, or other
+    **Available Document Types:** [{document_list_str}]
 
-Respond in this EXACT format (one line, no extra text):
-INTENT: [consultation|document_generation|both|document_info_gathering] | DOCUMENT: [type or none] | CONFIDENCE: [0.0-1.0]
+    **Classification Categories:**
+    - `consultation`: User wants legal advice, explanations, or guidance.
+    - `document_generation`: User explicitly asks to create, draft, or generate a legal document.
+    - `hybrid`: User asks for advice AND wants to generate a document.
+    - `general_conversation`: User is making small talk (e.g., "hello", "thank you", "who are you?").
 
-Example responses:
-INTENT: consultation | DOCUMENT: none | CONFIDENCE: 0.9
-INTENT: document_generation | DOCUMENT: demand_letter | CONFIDENCE: 0.85
-INTENT: both | DOCUMENT: demand_letter | CONFIDENCE: 0.8
-INTENT: document_info_gathering | DOCUMENT: demand_letter | CONFIDENCE: 0.95
-"""
-    
+    **User Message:**
+    ---
+    "{message}"
+    ---
+
+    **Chat History (for context):**
+    ---
+    {chat_history or "No history available."}
+    ---
+
+    Respond with a single, raw JSON object in the following format. Do not include markdown formatting like ```json.
+
+    {{
+      "intent": "...",
+      "document_type": "..." | null,
+      "confidence": 0.0-1.0
+    }}
+
+    **Examples:**
+    - User Message: "What are the rules for ejectment cases in the Philippines?" -> {{"intent": "consultation", "document_type": null, "confidence": 0.95}}
+    - User Message: "Help me make a demand letter for my tenant who won't pay rent." -> {{"intent": "hybrid", "document_type": "demand_letter", "confidence": 0.9}}
+    - User Message: "Generate an affidavit of loss for my wallet." -> {{"intent": "document_generation", "document_type": "affidavit_of_loss", "confidence": 0.98}}
+    - User Message: "Thanks, that was very helpful!" -> {{"intent": "general_conversation", "document_type": null, "confidence": 0.99}}
+    - User Message: "Hello there" -> {{"intent": "general_conversation", "document_type": null, "confidence": 1.0}}
+    """
+
     try:
-        # Use specialized intent classification persona
-        classification_persona = get_intent_classification_instruction()
-        
-        response = await generate_response(
-            prompt=intent_prompt,
-            persona=classification_persona
-        )
-        
+        response = await generate_response(prompt=intent_prompt, persona=persona)
         response_text = response.get("data", {}).get("response", "").strip()
-        logger.info(f"Intent detection response: {response_text}")
+        logger.info(f"Raw intent detection response from LLM: {response_text}")
+
+        # Clean the response in case the LLM adds markdown backticks
+        if response_text.startswith("```json"):
+            response_text = response_text[7:]
+        if response_text.endswith("```"):
+            response_text = response_text[:-3]
         
-        # Parse response
-        intent_match = re.search(r'INTENT:\s*(\w+)', response_text, re.IGNORECASE)
-        doc_match = re.search(r'DOCUMENT:\s*(\w+)', response_text, re.IGNORECASE)
-        conf_match = re.search(r'CONFIDENCE:\s*([\d.]+)', response_text, re.IGNORECASE)
+        # Parse the JSON response
+        data = json.loads(response_text)
+        intent = data.get("intent", "consultation").lower()
+        doc_type = data.get("document_type")
         
-        intent_type = intent_match.group(1).lower() if intent_match else "consultation"
-        doc_type = doc_match.group(1).lower() if doc_match else "none"
-        confidence = float(conf_match.group(1)) if conf_match else 0.5
-        
-        # Normalize document type
-        if doc_type == "none":
+        # Normalize doc_type if the LLM returns "none" or an empty string
+        if isinstance(doc_type, str) and doc_type.lower() in ["none", "null", ""]:
             doc_type = None
-        
+
         result = {
-            "intent_type": intent_type,
+            "intent": intent,
             "document_type": doc_type,
-            "confidence": confidence,
-            "needs_consultation": intent_type in ["consultation", "both"],
-            "needs_document": intent_type in ["document_generation", "both"]
+            "confidence": data.get("confidence", 0.5),
+            "needs_consultation": intent in ["consultation", "hybrid"],
+            "needs_document": intent in ["document_generation", "hybrid"],
+            "is_general_conversation": intent == "general_conversation"
         }
         
-        logger.info(f"Detected intent: {result}")
+        logger.info(f"Parsed intent: {result}")
         return result
         
+    except (json.JSONDecodeError, AttributeError, KeyError) as e:
+        logger.error(f"Failed to parse intent JSON from LLM response: '{response_text}'. Error: {e}", exc_info=True)
+        # Fallback to a safe default if parsing fails
+        return DEFAULT_INTENT
     except Exception as e:
-        logger.error(f"Error detecting intent: {e}", exc_info=True)
-        # Default to consultation on error
-        return {
-            "intent_type": "consultation",
-            "document_type": None,
-            "confidence": 0.3,
-            "needs_consultation": True,
-            "needs_document": False
-        }
+        logger.error(f"An unexpected error occurred during intent detection: {e}", exc_info=True)
+        return DEFAULT_INTENT
 
 
 def should_extract_document_info(message: str) -> bool:

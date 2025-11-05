@@ -1,10 +1,10 @@
 import logging
 from fastapi import APIRouter, HTTPException, Depends
 from motor.motor_asyncio import AsyncIOMotorClient
-from llm.generate_doc_prompt import system_instruction, prompt_for_DemandLetter
+from llm.generate_doc_prompt import system_instruction, prompt_for_DemandLetter, generate_doc_prompt
 from llm.llm_client import generate_response
 from db.connection import get_db
-from models.demand_letter import DemandLetterData
+from models.documents.demand_letter import DemandLetterData
 from datetime import datetime, timezone
 
 
@@ -20,8 +20,9 @@ async def generate_document_endpoint(demand_data: DemandLetterData, db: AsyncIOM
 
     try:
         # 1. Construct a detailed prompt from the structured data
-        prompt_message = prompt_for_DemandLetter(demand_data)
-        logger.info(f"Constructed prompt for LLM: {prompt_message[:500]}...") # Log first 500 chars
+        getDemandLetterData = prompt_for_DemandLetter(demand_data)
+        prompt_message = generate_doc_prompt(getDemandLetterData, "Demand Letter", "professional")
+        logger.info(f"Constructed prompt for LLM: {prompt_message}") 
 
         # 2. Store the structured data in the database for better record-keeping
         document_to_save = {
