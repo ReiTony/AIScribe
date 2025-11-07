@@ -64,7 +64,28 @@ async def chat_endpoint(
         
         logger.info(f"\nProcessing chat from {username}: \n{message}\n")
         
-        history_docs = await get_user_chat_history(db, username, limit=5)
+        history_docs = await get_user_chat_history(db, username, session_id=request.session_id, limit=5)
+
+        print("\n" + "="*20 + " DEBUGGING HISTORY " + "="*20)
+        print(f"FETCHING HISTORY FOR USER: {username} | SESSION ID: {request.session_id}")
+        if not history_docs:
+            print("!!! WARNING: NO HISTORY DOCUMENTS WERE FOUND !!!")
+        else:
+            for doc in history_docs:
+                role = doc.get('role', 'N/A')
+                content_snippet = doc.get('content', '')[:70].replace('\n', ' ')
+                metadata = doc.get('metadata', {})
+                print(f"- Role: {role}, Metadata: {metadata}, Content: '{content_snippet}...'")
+
+        last_assistant_message = next((doc for doc in reversed(history_docs) if doc.get('role') == 'assistant'), None)
+        print("\nLAST ASSISTANT MESSAGE FOUND:")
+        print(last_assistant_message)
+
+        is_gathering_info = (last_assistant_message and 
+                            last_assistant_message.get('metadata', {}).get('state') == 'gathering_doc_info')
+        print(f"\nSTATE CHECK (is_gathering_info): {is_gathering_info}")
+        print("="*60 + "\n")
+
         history_text = format_chat_history(history_docs)
         
         intent = await detect_intent(message, history_text)
@@ -84,7 +105,7 @@ async def chat_endpoint(
         # --- Handle Consultation ---
         if intent.get("needs_consultation", False):
             logger.info("Routing to consultation...")
-            consult_prompt = get_consultation_with_history_prompt(history_docs, message)
+            consult_prompt = get_consultation_with_history_prompt(history_text, message)
             persona = get_philippine_law_consultant_prompt()
             consult_result = await generate_response(consult_prompt, persona)
             consultation_response = consult_result.get("data", {}).get("response", "")
@@ -112,24 +133,36 @@ async def chat_endpoint(
 
             # --- PATH 2: CONVERSATIONAL PATH (User is typing) ---
             else:
-                doc_type = intent.get('document_type') or detect_document_type(message)
-                logger.info(f"Conversational document flow. Detected type: {doc_type}")
-
                 last_assistant_message = next((doc for doc in reversed(history_docs) if doc.get('role') == 'assistant'), None)
+                
+                # THE CRITICAL FIX: Read 'state' and 'doc_type' from the top level of the document, not from a nested 'metadata' field.
                 is_gathering_info = (last_assistant_message and 
-                                     last_assistant_message.get('metadata', {}).get('state') == 'gathering_doc_info' and
-                                     last_assistant_message.get('metadata', {}).get('doc_type') == doc_type)
+                                     last_assistant_message.get('state') == 'gathering_doc_info')
 
                 if is_gathering_info:
-                    logger.info(f"User is providing info for '{doc_type}'. Attempting extraction.")
-                    validated_data = await extract_and_validate_document_data(message, doc_type)
-                elif doc_type:
-                    logger.info(f"First request for '{doc_type}'. Asking for information.")
-                    document_response = get_information_request_prompt(doc_type)
-                    intent['doc_generation_state'] = 'gathering_info'
+                    # Trust the doc_type from the last turn's top-level key.
+                    doc_type = last_assistant_message.get('doc_type')
+                    logger.info(f"State detected: gathering info for '{doc_type}'. Extracting from user message.")
+                    
+                    if doc_type:
+                        validated_data = await extract_and_validate_document_data(message, doc_type)
+                        logger.info(f"\nExtraction and validation result: \n{validated_data}\n")
+                    else:
+                        logger.error("State is 'gathering_doc_info' but doc_type is missing from the message document.")
+                        document_response = "I seem to have lost track of which document we were working on. Could you please start over by asking for the document again?"
+
                 else:
-                    document_response = "I can help generate a legal document, but I couldn't determine which one you need. Please specify, for example: 'I need a demand letter'."
-                    intent['doc_generation_state'] = 'type_not_detected'
+                    # This is a new request. Use intent detection.
+                    doc_type = intent.get('document_type') or detect_document_type(message)
+                    logger.info(f"New document request. Detected type: {doc_type}")
+                    
+                    if doc_type:
+                        logger.info(f"First request for '{doc_type}'. Asking for information.")
+                        document_response = get_information_request_prompt(doc_type)
+                        intent['doc_generation_state'] = 'gathering_info'
+                    else:
+                        document_response = "I can help generate a legal document, but I couldn't determine which one you need. Please specify, for example: 'I need a demand letter'."
+                        intent['doc_generation_state'] = 'type_not_detected'
 
             # --- COMMON GENERATION STEP (runs if data was validated from either path) ---
             if validated_data:
@@ -137,6 +170,8 @@ async def chat_endpoint(
                 generation_prompt = f"""
                 You are an expert Filipino lawyer. Your task is to draft a formal and professional '{doc_type.replace('_', ' ')}' based on the following structured data.
                 Ensure the tone is appropriate, language is precise, and all legal formalities are observed.
+
+                Use the user's history for context {history_text}
 
                 **DOCUMENT DATA (JSON):**
                 ```json
@@ -147,6 +182,7 @@ async def chat_endpoint(
                 """
                 persona = system_instruction("lawyer")
                 doc_result = await generate_response(generation_prompt, persona)
+                logger.info(f"\n=================\nGeneration prompt result: \n{generation_prompt}\n=================\n")
                 document_response = doc_result.get("data", {}).get("response", "")
                 intent['doc_generation_state'] = 'completed'
             elif not document_response: # Catches failed extraction from conversational path

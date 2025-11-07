@@ -111,7 +111,7 @@ def get_consultation_with_history_prompt(chat_history: list, current_question: s
     context_parts = ["## CONVERSATION HISTORY (for context):\n"]
     
     # Include last 5 messages for context (configurable)
-    recent_messages = chat_history[-5:] if len(chat_history) > 5 else chat_history
+    recent_messages = chat_history[-3:] if len(chat_history) > 3 else chat_history
     
     for msg in recent_messages:
         role = msg.get("role", "user")

@@ -44,6 +44,7 @@ def format_chat_history(messages: List[Dict], limit: int = 5) -> str:
 async def get_user_chat_history(
     db: AsyncIOMotorClient,
     username: str,
+    session_id: str,
     limit: int = 5
 ) -> List[Dict]:
     """
@@ -60,9 +61,12 @@ async def get_user_chat_history(
     try:
         chat_collection = db["legalchat_histories"]
         
-        cursor = chat_collection.find(
-            {"username": username}
-        ).sort("timestamp", -1).limit(limit)
+        query = {
+        "username": username,
+        "session_id": session_id,
+        }
+    
+        cursor = chat_collection.find(query).sort("timestamp", -1).limit(limit)
         
         messages = await cursor.to_list(length=limit)
         return messages
