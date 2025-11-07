@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # Routers
 from routers.auth_route import router as auth_router
 from routers.chat_route import router as chat_router
+from routers.generate_doc import router as generate_doc_router
 
 # Logging Configuration
 logging.basicConfig(
@@ -32,6 +33,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
  
+origins = [
+    "http://192.168.0.112:8085", # Your React app's default development URL
+    "http://localhost:3000", # Vite's default development URL
+    # Add your production frontend URL here later
+]
+
 # Middleware
 app.add_middleware(
     CORSMiddleware,
@@ -45,6 +52,8 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
 
 app.include_router(chat_router, prefix="/api", tags=["Chat"])
+
+app.include_router(generate_doc_router, prefix="/api", tags=["Document Generation"])
 
 # Health & Root Endpoints
 @app.get("/health", tags=["System"], summary="Health Check")
