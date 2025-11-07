@@ -13,6 +13,15 @@ DOCUMENT_KEYWORDS = {
     "demand_letter": ["demand letter", "letter of demand", "collection letter", "sulat ng paniningil"],
     "affidavit_of_loss": ["affidavit of loss", "nawalan ng id", "lost id"],
     "special_power_of_attorney": ["spa", "special power of attorney"],
+     "employment_contract": [
+        "Contract of Employment",
+        "Employment Agreement",
+        "Job Contract",
+        "Letter of Appointment",
+        "Service Agreement",
+        "Kontrata sa Trabaho",
+        "Kasunduan sa Pag-empleyo"
+    ],
 }
 
 DOCUMENT_SCHEMAS: Dict[str, Type[BaseModel]] = ALL_SCHEMAS

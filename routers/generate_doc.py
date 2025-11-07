@@ -1,10 +1,11 @@
 import logging
 from fastapi import APIRouter, HTTPException, Depends
 from motor.motor_asyncio import AsyncIOMotorClient
-from llm.generate_doc_prompt import system_instruction, prompt_for_DemandLetter, generate_doc_prompt
+from llm.generate_doc_prompt import system_instruction, prompt_for_DemandLetter, generate_doc_prompt, prompt_for_EmploymentContract
 from llm.llm_client import generate_response
 from db.connection import get_db
 from models.documents.demand_letter import DemandLetterData
+from models.documents.employment_contract import EmploymentContract
 from datetime import datetime, timezone
 
 
@@ -16,17 +17,17 @@ def get_document_message_collection(db: AsyncIOMotorClient):
 
 
 @router.post("/generate-document")
-async def generate_document_endpoint(demand_data: DemandLetterData, db: AsyncIOMotorClient = Depends(get_db)):  
+async def generate_document_endpoint(Employment_Data: EmploymentContract, db: AsyncIOMotorClient = Depends(get_db)):  
 
     try:
         # 1. Construct a detailed prompt from the structured data
-        getDemandLetterData = prompt_for_DemandLetter(demand_data)
-        prompt_message = generate_doc_prompt(getDemandLetterData, "Demand Letter", "professional")
-        logger.info(f"Constructed prompt for LLM: {prompt_message}") 
+        getEmploymentContract = prompt_for_EmploymentContract(Employment_Data)
+        prompt_message = generate_doc_prompt(getEmploymentContract, "Employment Contract", "professional")
+        logger.info(f"Constructed prompt for LLM: {prompt_message}")
 
         # 2. Store the structured data in the database for better record-keeping
         document_to_save = {
-            "demand_data": demand_data.model_dump(by_alias=True), # Use by_alias to save with camelCase keys
+            "Employment_Data": Employment_Data.model_dump(by_alias=True), # Use by_alias to save with camelCase keys
             "generated_prompt": prompt_message,
             "created_at": datetime.now(timezone.utc)
         }

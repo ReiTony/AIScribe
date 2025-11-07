@@ -1,4 +1,5 @@
 from models.documents.demand_letter import DemandLetterData
+from models.documents.employment_contract import EmploymentContract
 from typing import Dict, Optional
 
 def system_instruction(persona: str) -> str:
@@ -140,4 +141,99 @@ def prompt_for_DemandLetter(data: DemandLetterData) -> str:
     - Mediation Offered: {'Yes' if data.additional_info.mediation else 'No'}
 
     Please draft the full text of the demand letter. Start with the sender's and recipient's information, followed by the date and subject. Then, write the body of the letter, incorporating all the details provided above in a clear, logical, and legally sound manner. Conclude with the sender's name and title.
+    """
+
+
+def prompt_for_EmploymentContract(data: EmploymentContract) -> str:
+    """
+    Converts the structured EmploymentContract object into a detailed string prompt for an LLM.
+    """
+    # Helper to format witness and notary info for clarity
+    signature_section = f"""- Witnesses: {', '.join(data.signature_info.witnesses) if data.signature_info.witnesses else 'None specified'}
+    - Notarization Required: {'Yes' if data.signature_info.is_notarized else 'No'}"""
+
+    if data.signature_info.is_notarized and data.signature_info.notary_details:
+        signature_section += f"""
+    - Notary Details:
+        - Doc. No.: {data.signature_info.notary_details.doc_no or '___'}
+        - Page No.: {data.signature_info.notary_details.page_no or '___'}
+        - Book No.: {data.signature_info.notary_details.book_no or '___'}
+        - Series of: {data.signature_info.notary_details.series_of or '___'}"""
+
+    return f"""
+    Please generate a formal and comprehensive Contract of Employment based on Philippine labor law.
+    The tone should be professional and legally sound. The document should be structured logically with clear headings for each clause.
+    Use all the detailed information provided below to construct the contract.
+
+    ---
+    **DOCUMENT CONTEXT**
+    - Date of Execution: {data.execution_date}
+    - Place of Execution: {data.execution_place}
+
+    ---
+    **PARTIES TO THE CONTRACT**
+    
+    **THE EMPLOYER:**
+    - Company Name: {data.employer.name}
+    - Principal Address: {data.employer.address}
+    - Nature of Business: {data.employer.business_nature}
+    - Represented by (Name): {data.employer.representative_name}
+    - Represented by (Title): {data.employer.representative_title}
+
+    **THE EMPLOYEE:**
+    - Employee Name: {data.employee.name}
+    - Employee Address: {data.employee.address}
+
+    ---
+    **CORE EMPLOYMENT TERMS**
+    - Position / Job Title: {data.employment_details.position}
+    - Initial Employment Status: {data.employment_details.status}
+    - Probationary Period: {data.employment_details.probationary_period_months} months
+    - Job Description: {data.employment_details.job_description}
+    ---
+    **COMPENSATION AND BENEFITS**
+    - Gross Basic Monthly Salary: {data.compensation.currency} {data.compensation.basic_monthly_salary:,.2f}
+    - Standard Deductions: {', '.join(data.compensation.deductions)}
+    - 13th Month Pay: {'Mandatory, to be paid at the end of the calendar year.' if data.compensation.has_thirteenth_month_pay else 'Not specified.'}
+    - Performance Bonus Policy: {data.compensation.performance_bonus_clause}
+    - Salary Adjustment Policy: {data.compensation.salary_adjustment_clause}
+
+    ---
+    **LEAVE ENTITLEMENTS (Upon Regularization)**
+    - Annual Vacation Leaves: {data.leave_benefits.vacation_leave_days} days
+    - Annual Sick Leaves: {data.leave_benefits.sick_leave_days} days
+    - Leave Conversion to Cash: {'Not convertible to cash.' if not data.leave_benefits.are_leaves_convertible_to_cash else 'Convertible to cash per company policy.'}
+    - Leave Accrual Policy: {data.leave_benefits.accrual_policy}
+
+    ---
+    **WORK CONDITIONS**
+    - Primary Place of Work: {data.work_conditions.primary_location}
+    - Transferability: {'Employee may be transferred to other locations as required by business needs.' if data.work_conditions.is_transferable else 'The work location is fixed.'}
+    - Work Schedule: {data.work_conditions.daily_hours} hours per day, {data.work_conditions.weekly_days} days per week.
+    - Overtime Policy: {data.work_conditions.overtime_policy}
+
+    ---
+    **EMPLOYEE COVENANTS & OBLIGATIONS**
+    - Work Exclusivity: {data.covenants.exclusivity_clause}
+    - Confidentiality: {data.covenants.confidentiality_clause}
+    - Intellectual Property: {data.covenants.intellectual_property_clause}
+    - Non-Competition Period After Employment: {data.covenants.non_competition_period_years} year(s)
+    - Non-Competition Clause Summary: {data.covenants.non_competition_clause}
+
+    ---
+    **TERMINATION OF EMPLOYMENT**
+    - Due Process: {'The employer reserves the right to terminate employment after observing due process.' if data.termination.due_process_mention else 'Termination will be based on the grounds specified.'}
+    - Grounds for Termination: {'; '.join(data.termination.termination_grounds)}
+
+    ---
+    **ACCEPTANCE & SIGNATURES**
+    - Acceptance Clause: {data.acceptance_clause}
+    {signature_section}
+
+    **INSTRUCTIONS FOR GENERATION:**
+    1.  Start with the preamble "KNOW ALL MEN BY THESE PRESENTS:" and the introductory paragraph identifying the parties.
+    2.  Create separate, numbered clauses for each major section (e.g., 1. APPOINTMENT, 2. COMPENSATION, 3. DUTIES AND RESPONSIBILITIES, etc.).
+    3.  Incorporate all the details from the sections above into their respective clauses.
+    4.  Conclude the document with the "IN WITNESS WHEREOF" closing, signature lines for the Employer and Employee, and lines for witnesses.
+    5.  If notarization is required, include a standard Acknowledgment section for a Notary Public in the Philippines.
     """
