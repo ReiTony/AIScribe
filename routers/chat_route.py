@@ -1,6 +1,7 @@
 import logging
+import json
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Type
 
 from fastapi import APIRouter, HTTPException, Depends
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -26,11 +27,10 @@ from utils.chat_helpers import (
     extract_document_info_from_message
 )
 from utils.document_handler import (
-    detect_document_type,
-    get_information_request_prompt,
-    extract_and_validate_document_data,
-    get_schema_for_document
+    detect_document_type
 )
+
+from utils.document_flow_manager import get_next_step_info, get_document_schema, get_flow_steps
 
 router = APIRouter()
 logger = logging.getLogger("ChatRouter")
@@ -47,6 +47,40 @@ def combine_responses(consult_resp: Optional[str], doc_resp: Optional[str], inte
     return doc_resp or consult_resp or "I'm sorry, I'm not sure how to respond. Can you please clarify?"
 
 
+async def parse_section_data(user_message: str, schema: Type[BaseModel]) -> Optional[Dict]:
+    """Uses a targeted LLM call to parse user text into a specific Pydantic sub-schema."""
+    schema_json = schema.model_json_schema()
+    prompt = f"""
+    The user has provided the following text. Extract the relevant information and format it as a JSON object that strictly follows the provided schema.
+    Handle natural language (e.g., 'yesterday', 'next week') by converting to specific dates if possible.
+    Interpret words like 'yes'/'no' as booleans.
+    For lists, if the user provides one item, create a list with that single item.
+
+    **Schema:**
+    ```json
+    {schema_json}
+    ```
+
+    **User Text:**
+    ---
+    {user_message}
+    ---
+
+    Output ONLY the raw JSON object. Do not include explanations or markdown formatting.
+    """
+    persona = system_instruction("data_extractor")
+    try:
+        response = await generate_response(prompt, persona)
+        response_text = response.get("data", {}).get("response", "").strip().replace("```json", "").replace("```", "")
+        data = json.loads(response_text)
+        # Validate the extracted data before returning to ensure correctness
+        schema(**data)
+        return data
+    except (json.JSONDecodeError, ValidationError) as e:
+        logger.error(f"Failed to parse or validate section data: {e}")
+        return None
+
+# 3. THE COMPLETE, SCHEMA-DRIVEN CHAT ENDPOINT
 @router.post("/chat", tags=["Chat"])
 async def chat_endpoint(
     request: ChatRequest,
@@ -54,164 +88,135 @@ async def chat_endpoint(
     current_user: Optional[dict] = Depends(get_current_user_optional)
 ):
     """
-    Intelligent chat endpoint with a dual-path system for document generation.
-    - Conversational Path: For standard chat messages.
-    - Fast Path: For structured data submitted from a front-end form.
+    Intelligent chat endpoint with a schema-driven, multi-step process for document generation.
     """
     try:
         username = current_user.get("username") if current_user else "anonymous"
         message = request.message
+        session_id = request.session_id
         
-        logger.info(f"\nProcessing chat from {username}: \n{message}\n")
+        logger.info(f"Processing chat from {username} (Session: {session_id}): {message[:150]}...")
         
-        history_docs = await get_user_chat_history(db, username, session_id=request.session_id, limit=5)
-
-        print("\n" + "="*20 + " DEBUGGING HISTORY " + "="*20)
-        print(f"FETCHING HISTORY FOR USER: {username} | SESSION ID: {request.session_id}")
-        if not history_docs:
-            print("!!! WARNING: NO HISTORY DOCUMENTS WERE FOUND !!!")
-        else:
-            for doc in history_docs:
-                role = doc.get('role', 'N/A')
-                content_snippet = doc.get('content', '')[:70].replace('\n', ' ')
-                metadata = doc.get('metadata', {})
-                print(f"- Role: {role}, Metadata: {metadata}, Content: '{content_snippet}...'")
-
-        last_assistant_message = next((doc for doc in reversed(history_docs) if doc.get('role') == 'assistant'), None)
-        print("\nLAST ASSISTANT MESSAGE FOUND:")
-        print(last_assistant_message)
-
-        is_gathering_info = (last_assistant_message and 
-                            last_assistant_message.get('metadata', {}).get('state') == 'gathering_doc_info')
-        print(f"\nSTATE CHECK (is_gathering_info): {is_gathering_info}")
-        print("="*60 + "\n")
-
+        history_docs = await get_user_chat_history(db, username, session_id, limit=5)
         history_text = format_chat_history(history_docs)
         
-        intent = await detect_intent(message, history_text)
-        logger.info(f"Intent detected: {intent}")
-
-        # --- Handle General Conversation (Early Exit) ---
-        if intent.get("is_general_conversation"):
-            final_response = "I am a legal assistant bot designed to help with Philippine law. How can I assist you with legal consultation or document generation today?"
-            await save_chat_message(db, username, "user", message, {"intent": intent, "session_id": request.session_id})
-            await save_chat_message(db, username, "assistant", final_response, {"intent": intent, "session_id": request.session_id})
-            return {"response": final_response, "intent": intent, "timestamp": datetime.now(timezone.utc).isoformat()}
-
-        consultation_response = None
-        document_response = None
-        doc_type = None
-
-        # --- Handle Consultation ---
-        if intent.get("needs_consultation", False):
-            logger.info("Routing to consultation...")
-            consult_prompt = get_consultation_with_history_prompt(history_text, message)
-            persona = get_philippine_law_consultant_prompt()
-            consult_result = await generate_response(consult_prompt, persona)
-            consultation_response = consult_result.get("data", {}).get("response", "")
+        last_assistant_message = next((doc for doc in reversed(history_docs) if doc.get('role') == 'assistant'), None)
         
-        # --- Handle Document Generation (Dual Path Logic) ---
-        if intent.get("needs_document", False):
-            validated_data = None
+        final_response = None
+        assistant_metadata = {}
+        consultation_response = None
+
+        # --- STATE CHECK: Are we in the middle of a document flow? ---
+        is_collecting_data = (last_assistant_message and 
+                              last_assistant_message.get('state') == 'collecting_document_data')
+
+        if is_collecting_data:
+            # --- PATH 1: CONTINUE DOCUMENT FLOW ---
+            current_doc_type = last_assistant_message.get('doc_type')
+            current_section = last_assistant_message.get('current_section')
+            collected_data = last_assistant_message.get('collected_data', {})
             
-            # --- PATH 1: FAST PATH (Structured Data from Request Body) ---
-            if request.document_data and request.document_type:
-                logger.info(f"Received structured document data for type: '{request.document_type}'. Bypassing LLM extraction.")
-                doc_type = request.document_type
-                schema = get_schema_for_document(doc_type)
+            flow_steps = get_flow_steps(current_doc_type)
+            current_schema = next((schema for name, schema in flow_steps if name == current_section), None)
+
+            parsed_data = await parse_section_data(message, current_schema) if current_schema else None
+
+            if parsed_data:
+                collected_data[current_section] = parsed_data
+                next_step = get_next_step_info(current_doc_type, current_section)
                 
-                if schema:
+                if next_step:
+                    # More sections to fill, ask the next question
+                    final_response = next_step["question"]
+                    assistant_metadata = {
+                        "state": "collecting_document_data",
+                        "doc_type": current_doc_type,
+                        "current_section": next_step["section_name"],
+                        "collected_data": collected_data
+                    }
+                else:
+                    # END OF FLOW: All sections collected. Validate and generate.
                     try:
-                        validated_data = schema(**request.document_data)
-                        logger.info("Structured data validated successfully against Pydantic schema.")
+                        main_schema = get_document_schema(current_doc_type)
+                        full_document_data = main_schema(**collected_data)
+                        
+                        logger.info(f"All data for '{current_doc_type}' collected and validated. Generating final document.")
+                        generation_prompt = f"""
+                        You are an expert Filipino lawyer. Draft a complete and formal '{current_doc_type.replace('_', ' ')}' using the following structured data.
+                        The document must be professional, legally sound, and ready for use.
+                        
+                        **Final Document Data (JSON):**
+                        ```json
+                        {full_document_data.model_dump_json(indent=2, by_alias=True)}
+                        ```
+                        """
+                        persona = system_instruction("lawyer")
+                        doc_result = await generate_response(generation_prompt, persona)
+                        final_response = doc_result.get("data", {}).get("response", "Error generating document.")
+                        assistant_metadata = {"state": "completed"}
+                    
                     except ValidationError as e:
-                        logger.error(f"Pydantic validation failed for structured data: {e.errors()}")
-                        raise HTTPException(status_code=422, detail={"msg": "Invalid document data provided.", "errors": e.errors()})
-                else:
-                    logger.warning(f"Unknown document type '{doc_type}' received in fast path.")
-                    document_response = f"I received data for a document type I don't recognize: '{doc_type}'."
-
-            # --- PATH 2: CONVERSATIONAL PATH (User is typing) ---
+                        logger.error(f"Final data validation failed for {current_doc_type}: {e}")
+                        final_response = "There was an issue putting all the information together. Let's try that last part again."
+                        assistant_metadata = last_assistant_message # Re-ask by reverting to previous state
             else:
-                last_assistant_message = next((doc for doc in reversed(history_docs) if doc.get('role') == 'assistant'), None)
+                # Failed to parse the user's answer. Re-ask the same question.
+                last_question = last_assistant_message.get('content', "Could you please provide the information again?")
+                final_response = f"I had some trouble understanding that. Let's try again.\n\n{last_question}"
+                assistant_metadata = last_assistant_message # Preserve state to re-ask
+
+        else:
+            # --- PATH 2: NEW CONVERSATION TURN ---
+            intent = await detect_intent(message, history_text)
+            logger.info(f"Intent detected: {intent}")
+
+            if intent.get("is_general_conversation"):
+                final_response = "I am a legal assistant bot. How can I assist with legal consultation or document generation?"
+            
+            elif intent.get("needs_document"):
+                doc_type = intent.get('document_type') or detect_document_type(message)
+                first_step = get_next_step_info(doc_type)
                 
-                # THE CRITICAL FIX: Read 'state' and 'doc_type' from the top level of the document, not from a nested 'metadata' field.
-                is_gathering_info = (last_assistant_message and 
-                                     last_assistant_message.get('state') == 'gathering_doc_info')
-
-                if is_gathering_info:
-                    # Trust the doc_type from the last turn's top-level key.
-                    doc_type = last_assistant_message.get('doc_type')
-                    logger.info(f"State detected: gathering info for '{doc_type}'. Extracting from user message.")
-                    
-                    if doc_type:
-                        validated_data = await extract_and_validate_document_data(message, doc_type)
-                        logger.info(f"\nExtraction and validation result: \n{validated_data}\n")
-                    else:
-                        logger.error("State is 'gathering_doc_info' but doc_type is missing from the message document.")
-                        document_response = "I seem to have lost track of which document we were working on. Could you please start over by asking for the document again?"
-
+                if first_step:
+                    final_response = first_step["question"]
+                    assistant_metadata = {
+                        "state": "collecting_document_data",
+                        "doc_type": doc_type,
+                        "current_section": first_step["section_name"],
+                        "collected_data": {}
+                    }
                 else:
-                    # This is a new request. Use intent detection.
-                    doc_type = intent.get('document_type') or detect_document_type(message)
-                    logger.info(f"New document request. Detected type: {doc_type}")
-                    
-                    if doc_type:
-                        logger.info(f"First request for '{doc_type}'. Asking for information.")
-                        document_response = get_information_request_prompt(doc_type)
-                        intent['doc_generation_state'] = 'gathering_info'
-                    else:
-                        document_response = "I can help generate a legal document, but I couldn't determine which one you need. Please specify, for example: 'I need a demand letter'."
-                        intent['doc_generation_state'] = 'type_not_detected'
+                    final_response = f"I don't have a guided process for the '{doc_type}' document type yet."
 
-            # --- COMMON GENERATION STEP (runs if data was validated from either path) ---
-            if validated_data:
-                logger.info(f"Validated data for '{doc_type}' is ready. Generating document...")
-                generation_prompt = f"""
-                You are an expert Filipino lawyer. Your task is to draft a formal and professional '{doc_type.replace('_', ' ')}' based on the following structured data.
-                Ensure the tone is appropriate, language is precise, and all legal formalities are observed.
-
-                Use the user's history for context {history_text}
-
-                **DOCUMENT DATA (JSON):**
-                ```json
-                {validated_data.model_dump_json(indent=2, by_alias=True)}
-                ```
+            if intent.get("needs_consultation"):
+                logger.info("Routing to consultation...")
+                consult_prompt = get_consultation_with_history_prompt(history_text, message)
+                persona = system_instruction("philippine_law_consultant")
+                consult_result = await generate_response(consult_prompt, persona)
+                consultation_response = consult_result.get("data", {}).get("response", "")
                 
-                Draft the complete and final document now.
-                """
-                persona = system_instruction("lawyer")
-                doc_result = await generate_response(generation_prompt, persona)
-                logger.info(f"\n=================\nGeneration prompt result: \n{generation_prompt}\n=================\n")
-                document_response = doc_result.get("data", {}).get("response", "")
-                intent['doc_generation_state'] = 'completed'
-            elif not document_response: # Catches failed extraction from conversational path
-                document_response = "Thank you. I had some trouble understanding all the details provided. Could you please review and provide them again in a clearer format?"
-                intent['doc_generation_state'] = 'failed_extraction'
+                # Combine with document response if it exists (for hybrid intents)
+                final_response = combine_responses(consultation_response, final_response)
 
         # --- Finalize and Save ---
-        final_response = combine_responses(consultation_response, document_response, intent["intent"])
-        logger.info(f"Final response prepared for {username}.")
-
-        await save_chat_message(db, username, "user", message, {"intent": intent, "session_id": request.session_id})
+        if not final_response:
+             final_response = "I'm sorry, I'm not sure how to help with that. Could you rephrase?"
         
-        assistant_metadata = {"intent": intent, "session_id": request.session_id}
-        if intent.get('doc_generation_state') == 'gathering_info' and doc_type:
-            assistant_metadata['state'] = 'gathering_doc_info'
-            assistant_metadata['doc_type'] = doc_type
-
-        await save_chat_message(db, username, "assistant", final_response, assistant_metadata)
+        # Add the original intent to the metadata for logging/analytics
+        assistant_metadata['intent'] = locals().get('intent', {})
         
-        logger.info(f"\n===========\nResponse recieved: \n {final_response}\n===========\n")
+        await save_chat_message(db, username, "user", message, {"session_id": session_id})
+        await save_chat_message(db, username, "assistant", final_response, {**assistant_metadata, "session_id": session_id})
+        
+        logger.info(f"Final response sent to {username} (Session: {session_id}): {final_response}")
         
         return {
             "response": final_response,
-            "intent": intent,
+            "intent": locals().get('intent', {}), # Return the detected intent if it exists
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
         
     except HTTPException as http_exc:
-        # Re-raise HTTP exceptions to let FastAPI handle them
         raise http_exc
     except Exception as e:
         logger.error(f"An unexpected error occurred in chat_endpoint: {e}", exc_info=True)

@@ -1,6 +1,7 @@
 import logging
 from typing import Dict, Any, Type, Callable, Optional, Set
 from fastapi import APIRouter, HTTPException, Depends, Body
+from pydantic import ValidationError
 from motor.motor_asyncio import AsyncIOMotorClient
 from llm.generate_doc_prompt import system_instruction, prompt_for_DemandLetter, generate_doc_prompt, prompt_for_EmploymentContract
 from llm.llm_client import generate_response
