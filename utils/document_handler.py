@@ -1,13 +1,35 @@
-import json
-from typing import Type, Dict, Optional, Any
-from pydantic import BaseModel
-from models.documents import ALL_SCHEMAS 
-from llm.generate_doc_prompt import system_instruction
-from llm.llm_client import generate_response
 import logging
+from typing import Dict, Any, Type, Callable, Optional, Set
+from datetime import datetime, timezone
+from fastapi import APIRouter, HTTPException, Depends, Body
+from pydantic import BaseModel, ValidationError
+from motor.motor_asyncio import AsyncIOMotorClient
+from models.documents import ALL_SCHEMAS
+from models.documents.demand_letter import DemandLetterData
+from models.documents.employment_contract import EmploymentContract
+from llm.generate_doc_prompt import (
+    system_instruction, 
+    generate_doc_prompt, 
+    prompt_for_DemandLetter, 
+    prompt_for_EmploymentContract
+)
+from llm.llm_client import generate_response
+from db.connection import get_db
 
-logger = logging.getLogger("DocumentHandler")
+router = APIRouter()
+logger = logging.getLogger("DocumentJSONRouter")
 
+
+DOCUMENT_SCHEMAS: Dict[str, Type[BaseModel]] = {
+    "demand_letter": DemandLetterData,
+    "employment_contract": EmploymentContract
+}
+
+PROMPT_GENERATORS: Dict[str, Callable[[BaseModel], str]] = {
+    "demand_letter": prompt_for_DemandLetter,
+    "employment_contract": prompt_for_EmploymentContract
+    # Add other prompt generators here
+}
 
 DOCUMENT_KEYWORDS = {
     "demand_letter": ["demand letter", "letter of demand", "collection letter", "sulat ng paniningil"],
@@ -24,19 +46,28 @@ DOCUMENT_KEYWORDS = {
     ],
 }
 
-DOCUMENT_SCHEMAS: Dict[str, Type[BaseModel]] = ALL_SCHEMAS
+DOCUMENT_DETECTORS: Dict[str, Set[str]] = {
+    "demand_letter": {"basicInfo", "senderInfo", "recipientInfo", "demandInfo"},
+    "employment_contract": {"employer", "employee", "employmentDetails", "compensation"}
 
-def detect_document_type(message: str) -> Optional[str]:
+}
+
+def get_document_generation_collection(db: AsyncIOMotorClient):
+    """Gets the collection for storing generated document histories."""
+    return db["document_generation_histories"]
+
+
+def detect_document_type(data: Dict[str, Any]) -> Optional[str]:
     """
-    Detects the requested document type from a user's message using keywords.
+    Detects the document type by checking for the presence of unique top-level keys.
     """
-    message_lower = message.lower()
-    for doc_type, keywords in DOCUMENT_KEYWORDS.items():
-        if any(keyword in message_lower for keyword in keywords):
+    incoming_keys = set(data.keys())
+    for doc_type, required_keys in DOCUMENT_DETECTORS.items():
+        if required_keys.issubset(incoming_keys):
+            logger.info(f"Detected document type as: {doc_type}")
             return doc_type
+    logger.warning("Could not detect document type from incoming JSON keys.")
     return None
-
-# --- Schema and Prompt Generation ---
 
 
 def get_schema_for_document(doc_type: str) -> Optional[Type[BaseModel]]:
