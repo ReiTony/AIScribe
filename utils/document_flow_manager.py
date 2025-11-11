@@ -37,18 +37,30 @@ def is_section_complete(section_schema: Type[BaseModel], collected_data: dict) -
         - A boolean indicating if the section is complete.
         - A list of missing required field names.
     """
-    missing_fields = []
+    missing_fields: List[str] = []
+
+    # If the stored section data isn't a dict (edge case: accidentally stored a BaseModel),
+    # attempt to normalize it so completeness checks remain stable.
     if not isinstance(collected_data, dict):
-        collected_data = {}
+        if hasattr(collected_data, "model_dump"):
+            try:
+                collected_data = collected_data.model_dump(by_alias=True)
+            except Exception:
+                collected_data = {}
+        else:
+            collected_data = {}
+
     for field_name, field_info in section_schema.model_fields.items():
         if field_info.is_required():
-            is_present = (field_name in collected_data) or \
-                         (field_info.alias and field_info.alias in collected_data)
-            
+            # Accept either pythonic field name or alias (camelCase) as present
+            is_present = (field_name in collected_data) or (
+                bool(field_info.alias) and field_info.alias in collected_data
+            )
             if not is_present:
+                # Use user-friendly formatting of missing field name
                 missing_fields.append(field_name.replace('_', ' ').title())
-                
-    return not missing_fields, missing_fields
+
+    return (len(missing_fields) == 0), missing_fields
 
 def generate_question_for_step(section_name: str, section_schema: Type[BaseModel]) -> str:
     """
@@ -132,3 +144,22 @@ def get_next_step_info(doc_type: str, current_section_name: Optional[str] = None
         "section_schema": next_section_schema,
         "question": question
     }
+
+def generate_follow_up_question(section_name: str, section_schema: Type[BaseModel], missing_fields: List[str]) -> str:
+    """
+    Generates a targeted question asking only for the missing fields in a section.
+    """
+    section_title = section_name.replace('_', ' ').title()
+    
+    if not missing_fields:
+        # This function should not be called if nothing is missing, but as a fallback:
+        return generate_question_for_step(section_name, section_schema)
+        
+    # Create a user-friendly list of what's missing
+    if len(missing_fields) > 1:
+        missing_list = ", ".join(missing_fields[:-1]) + f" and {missing_fields[-1]}"
+        prompt = f"Thanks for that information. For the **{section_title}** section, I just need a few more details: the **{missing_list}**."
+    else:
+        prompt = f"Thanks! For the **{section_title}** section, could you please also provide the **{missing_fields[0]}**?"
+
+    return prompt

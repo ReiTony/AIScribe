@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from llm.generate_doc_prompt import system_instruction
 from llm.llm_client import generate_response
 import logging
+
 logger = logging.getLogger("DocumentParseHelpers")
 
 async def parse_user_reply_for_sections(
@@ -18,8 +19,7 @@ async def parse_user_reply_for_sections(
     all_schemas = {name: schema.model_json_schema() for name, schema in flow_steps}
     
     prompt = f"""
-    You are an intelligent data extraction assistant. The user is in a multi-step process to fill out a document.
-    The user has provided a single message. Your task is to analyze this message and extract any information that can fill out ANY of the sections listed below.
+    You are an expert data extraction assistant. The user is providing information to fill out a multi-section document. Your task is to analyze the user's message and extract any information that can fill out ANY of the sections defined in the schemas below.
 
     **Available Sections and Their Schemas:**
     ```json
@@ -32,23 +32,40 @@ async def parse_user_reply_for_sections(
     ---
 
     **Instructions:**
-    1. Read the user's message carefully.
-    2. Determine which section(s) the information belongs to. The user may provide data for one or multiple sections.
-    3. Construct a JSON object where the keys are the section names (e.g., "basic_info", "sender_info") and the values are the extracted data for that section.
-    4. If the user's message does not contain relevant information for any section, return an empty JSON object {{}}.
-    5. Omit any fields from the sub-objects that are not mentioned by the user.
+    1.  Read the user's message carefully. The user may provide data for one or multiple sections, sometimes in a single sentence.
+    2.  Determine which section(s) the information belongs to.
+    3.  Construct a JSON object where the keys are the section names (e.g., "basic_info", "sender_info") and the values are the extracted data for that section, conforming to the schema.
+    4.  **Crucially, you must infer field names from context.** If the user says "Debt collection", and the "basic_info" schema has a "subject" field, you must map "Debt collection" to the "subject" field.
+    5.  Omit any fields from the sub-objects that are not mentioned by the user.
+    6.  If the user's message is a greeting or contains no relevant data, return an empty JSON object {{}}.
 
-    **Example:**
-    User Message: "The sender is John Doe from ACME Inc."
+    **Example 1:**
+    User Message: "The sender is John Doe from ACME Inc. and the recipient is Jane Smith."
     Your JSON Output: 
     {{
         "sender_info": {{
             "name": "John Doe",
             "company": "ACME Inc."
+        }},
+        "recipient_info": {{
+            "name": "Jane Smith"
         }}
     }}
 
+    **Example 2 (Handling comma-separated and implicit fields):**
+    User Message: "letter date: 11/15/25, letter number: 2, Debt collection, Medium, Payment Demand"
     Your JSON Output:
+    {{
+        "basic_info": {{
+            "letterDate": "11/15/25",
+            "letterNumber": "2",
+            "subject": "Debt collection",
+            "urgency": "Medium",
+            "category": "Payment Demand"
+        }}
+    }}
+    
+    **Your JSON Output:**
     """
     persona = system_instruction("data_extractor")
     try:
