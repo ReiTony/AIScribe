@@ -15,38 +15,38 @@ class EmployeeInfo(BaseModel):
 class EmploymentDetails(BaseModel):
     position: str 
     status: Literal['Probationary', 'Regular', 'Project', 'Fixed-Term'] = Field(..., description="The initial employment status.")
-    probationary_period_months: int 
-    job_description: str 
+    probationary_period_months: Optional[int] 
+    job_description: str
 
 class CompensationPackage(BaseModel):
     basic_monthly_salary: float 
     currency: str = Field(default="PHP")
     deductions: List[str] = Field(default=["withholding tax", "SSS premiums", "Pag-ibig contributions", "Philhealth dues"], description="List of standard government-required deductions.")
     has_thirteenth_month_pay: bool = Field(True, alias="hasThirteenthMonthPay")
-    performance_bonus_clause: str 
-    salary_adjustment_clause: str 
+    performance_bonus_clause: Optional[str] 
+    salary_adjustment_clause: Optional[str] 
 
 class LeaveBenefits(BaseModel):
-    applicable_after_regularization: bool = Field(True, alias="applicableAfterRegularization")
+    applicable_after_regularization: Optional[bool] = Field(True, alias="applicableAfterRegularization")
     vacation_leave_days: int 
     sick_leave_days: int 
-    are_leaves_convertible_to_cash: bool = Field(False,)
-    accrual_policy: str
+    are_leaves_convertible_to_cash: Optional[bool] = Field(False,)
+    accrual_policy: Optional[str]
 
 class WorkConditions(BaseModel):
-    primary_location: str 
-    is_transferable: bool = Field(True, alias="isTransferable")
-    travel_required: bool = Field(True, alias="travelRequired")
-    daily_hours: int 
-    weekly_days: int 
-    overtime_policy: str 
+    primary_location: Optional[str] 
+    is_transferable: Optional[bool] = Field(True, alias="isTransferable")
+    travel_required: Optional[bool] = Field(True, alias="travelRequired")
+    daily_hours: Optional[int] 
+    weekly_days: Optional[int] 
+    overtime_policy: Optional[str] 
 
 class Covenants(BaseModel):
-    non_competition_period_years: int 
-    non_competition_clause: str 
-    intellectual_property_clause: str 
-    confidentiality_clause: str 
-    exclusivity_clause: str 
+    non_competition_period_years: Optional[int] 
+    non_competition_clause: Optional[str] 
+    intellectual_property_clause: Optional[str] 
+    confidentiality_clause: Optional[str] 
+    exclusivity_clause: Optional[str] 
 
 class TerminationClause(BaseModel):
     termination_grounds: List[str] = Field(..., alias="terminationGrounds", description="List of causes for which employment can be terminated.")
