@@ -3,11 +3,12 @@ from typing import Dict, Any, Type, Callable, Optional, Set
 from fastapi import APIRouter, HTTPException, Depends, Body
 from pydantic import ValidationError
 from motor.motor_asyncio import AsyncIOMotorClient
-from llm.generate_doc_prompt import system_instruction, prompt_for_DemandLetter, generate_doc_prompt, prompt_for_EmploymentContract
+from llm.generate_doc_prompt import system_instruction, prompt_for_DemandLetter, generate_doc_prompt, prompt_for_EmploymentContract, prompt_for_ServiceAgreement
 from llm.llm_client import generate_response
 from db.connection import get_db
 from models.documents.demand_letter import DemandLetterData
 from models.documents.employment_contract import EmploymentContract
+from models.documents.service_agreement import ServiceAgreementData
 from datetime import datetime, timezone
 from utils.document_handler import detect_document_type
 from utils.document_handler import DOCUMENT_SCHEMAS, PROMPT_GENERATORS
@@ -72,7 +73,7 @@ async def generate_document_from_json(
         
         llm_response = await generate_response(final_prompt, persona)
         generated_document = llm_response.get("data", {}).get("response")
-
+        logger.info(f"Generated response: {llm_response}")
         if not generated_document:
             raise HTTPException(status_code=500, detail="Failed to generate document from LLM.")
 
@@ -87,6 +88,7 @@ async def generate_document_from_json(
         # 6. Return the final document
         return {
             "response": generated_document
+
         }
 
     except HTTPException as e:
