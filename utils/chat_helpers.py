@@ -11,7 +11,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 logger = logging.getLogger("ChatHelpers")
 
 
-def format_chat_history(messages: List[Dict], limit: int = 5) -> str:
+def format_chat_history(messages: List[Dict], limit: int = 12) -> str:
     """
     Format chat history into a readable string for LLM context.
     
@@ -61,9 +61,9 @@ async def get_user_chat_history(
     try:
         chat_collection = db["legalchat_histories"]
         
+        # Use session-based history to maintain FSM state even if auth status changes
         query = {
-        "username": username,
-        "session_id": session_id,
+            "session_id": session_id,
         }
     
         cursor = chat_collection.find(query).sort("timestamp", -1).limit(limit)
