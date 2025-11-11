@@ -9,12 +9,14 @@ from models.documents import ALL_SCHEMAS
 from models.documents.demand_letter import DemandLetterData
 from models.documents.employment_contract import EmploymentContract
 from models.documents.service_agreement import ServiceAgreementData
+from models.documents.sales_promotion_permit import DtiSalesPromoApplicationData
 from llm.generate_doc_prompt import (
     system_instruction, 
     generate_doc_prompt, 
     prompt_for_DemandLetter, 
     prompt_for_EmploymentContract,
-    prompt_for_ServiceAgreement
+    prompt_for_ServiceAgreement,
+    prompt_for_DtiSalesPromoApplication,
 )
 from llm.llm_client import generate_response
 from db.connection import get_db
@@ -26,13 +28,15 @@ logger = logging.getLogger("DocumentJSONRouter")
 DOCUMENT_SCHEMAS: Dict[str, Type[BaseModel]] = {
     "demand_letter": DemandLetterData,
     "employment_contract": EmploymentContract,
-    "service_agreement": ServiceAgreementData
+    "service_agreement": ServiceAgreementData,
+    "sales_promotion_permit": DtiSalesPromoApplicationData
 }
 
 PROMPT_GENERATORS: Dict[str, Callable[[BaseModel], str]] = {
     "demand_letter": prompt_for_DemandLetter,
     "employment_contract": prompt_for_EmploymentContract,
-    "service_agreement": prompt_for_ServiceAgreement
+    "service_agreement": prompt_for_ServiceAgreement,
+    "sales_promotion_permit": prompt_for_DtiSalesPromoApplication,
     # Add other prompt generators here
 }
 
@@ -55,13 +59,15 @@ DOCUMENT_KEYWORDS = {
         "Service Contract",
         "Kasunduan sa Serbisyo",
         "Kontrata para sa mga Serbisyo"
-    ]
+    ],
+    "sales_promotion_permit": ["sales promotion permit", "promo permit", "DTI promo permit", "permit for sales promotion"]
 }
 
 DOCUMENT_DETECTORS: Dict[str, Set[str]] = {
     "demand_letter": {"basicInfo", "senderInfo", "recipientInfo", "demandInfo"},
     "employment_contract": {"employer", "employee", "employmentDetails", "compensation"},
-    "service_agreement": {"client", "provider", "servicesToBeProvided", "compensation"}
+    "service_agreement": {"client", "provider", "servicesToBeProvided", "compensation"},
+    "sales_promotion_permit": {"promoTitle", "applicationDate", "sponsor", "advertisingAgency"}
 
 }
 

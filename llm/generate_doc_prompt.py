@@ -1,6 +1,7 @@
 from models.documents.demand_letter import DemandLetterData
 from models.documents.employment_contract import EmploymentContract
 from models.documents.service_agreement import ServiceAgreementData
+from models.documents.sales_promotion_permit import DtiSalesPromoApplicationData
 from typing import Dict, Optional
 
 def system_instruction(persona: str) -> str:
@@ -326,4 +327,127 @@ def prompt_for_ServiceAgreement(data: ServiceAgreementData) -> str:
     5.  Integrate all the specific details provided above into their corresponding clauses using formal legal language.
     6.  Conclude with an "IN WITNESS WHEREOF" section, providing signature blocks for the authorized representatives of both parties.
     7.  Include space for witnesses and a standard Notarial Acknowledgment section appropriate for the specified governing law.
+    """
+
+# First, ensure the DTI Pydantic models you created are defined in your script.
+# (RepresentativeInfo, CompanyInfo, DtiSalesPromoApplicationData, etc.)
+
+def prompt_for_DtiSalesPromoApplication(data: DtiSalesPromoApplicationData) -> str:
+    """
+    Converts the structured DtiSalesPromoApplicationData object into a detailed string prompt for an LLM.
+    """
+    
+    # Helper function to represent checkboxes
+    def checkbox(value: bool) -> str:
+        return "[X]" if value else "[ ]"
+
+    # Format optional Advertising Agency section
+    if data.advertising_agency:
+        ad_agency_str = f"""- Name: {data.advertising_agency.name}
+    - Address: {data.advertising_agency.address}
+    - Telephone No: {data.advertising_agency.telephone_no}
+    - Authorized Representative: {data.advertising_agency.representative.name}
+    - Designation: {data.advertising_agency.representative.designation}"""
+    else:
+        ad_agency_str = "N/A"
+
+    # Format lists for better readability
+    participating_establishments_str = "\n".join([f"    - {est}" for est in data.participating_establishments])
+    products_covered_str = "\n".join(
+        f"    - Brand: {prod.brand}, Sizes: {prod.sizes}, Specifications: {prod.specifications}" 
+        for prod in data.products_covered
+    )
+
+    # Format the complex attachments and media utilized sections
+    media = data.attachments.media_utilized
+    media_str = f"""    {checkbox(media.radio_ad_script)} RADIO AD (Audio Script)
+    {checkbox(media.tv_cinema_ad_storyboard)} TV/CINEMA AD (Story Board)
+    {checkbox(media.web_based_ads_screenshots)} WEB-BASED ADS (Screenshots)
+    {checkbox(media.email_based_ads_transcript)} EMAIL-BASED ADS (Email Transcript)
+    {checkbox(media.text_based_ads_transcript)} TEXT-BASED ADS (Text transcript)
+    {checkbox(media.poster_layout)} POSTER (Layout of Artwork)
+    {checkbox(media.streamer_layout)} STREAMER (Layout of Artwork)
+    {checkbox(media.print_ad_compre)} PRINT AD (compre)
+    {checkbox(media.mailers_compre)} MAILERS (compre)
+    {checkbox(media.flyers_compre)} FLYERS (compre)
+    - Others: {media.others_specify or 'N/A'}"""
+
+    attachments = data.attachments
+    attachments_str = f"""{checkbox(attachments.list_of_items_on_sale)} A. LIST OF ITEMS ON SALE
+{checkbox(attachments.total_prizes_or_premium_cost)} B. TOTAL AMOUNT OF PRIZES / PROJECTED COST
+{checkbox(attachments.complete_mechanics)} C. COMPLETE MECHANICS
+{checkbox(attachments.control_measures)} D. CONTROL MEASURES
+{checkbox(attachments.promo_particulars)} E. PROMO PARTICULARS
+{checkbox(attachments.registration_requirements)} F. REGISTRATION REQUIREMENTS
+{checkbox(attachments.agreement_of_participating_outlets)} G. AGREEMENT OF PARTICIPATING OUTLETS
+{checkbox(attachments.legal_docs_for_high_value_prizes)} H. LEGAL DOCUMENTS OF HIGH-VALUED PRIZES
+{checkbox(True)} I. MEDIA UTILIZED:
+{media_str}"""
+
+    return f"""
+    Please generate the full text of a filled-out DTI Sales Promotion Permit Application Form.
+    The output should be a clean, formatted text document that looks like the official form with the data populated.
+    Use the structured information provided below. For checkboxes, use [X] for checked and [ ] for unchecked.
+
+    ---
+    **HEADER INFORMATION**
+    - Promo Title: {data.promo_title}
+    - Application Date: {data.application_date}
+
+    ---
+    **1. SPONSOR DETAILS**
+    - Name: {data.sponsor.name}
+    - Address: {data.sponsor.address}
+    - Telephone No: {data.sponsor.telephone_no}
+    - Authorized Representative: {data.sponsor.representative.name}
+    - Designation: {data.sponsor.representative.designation}
+
+    ---
+    **2. ADVERTISING AGENCY DETAILS**
+    {ad_agency_str}
+
+    ---
+    **3. PROMO PERIOD**
+    - From: {data.promo_period.start_date}
+    - To: {data.promo_period.end_date}
+
+    ---
+    **4. TYPE OF PROMO**
+    - {checkbox("Discount" in data.promo_type.types)} DISCOUNT
+    - {checkbox("Premium" in data.promo_type.types)} PREMIUM
+    - {checkbox("Raffle" in data.promo_type.types)} RAFFLE
+    - {checkbox("Games" in data.promo_type.types)} GAMES
+    - {checkbox("Contests" in data.promo_type.types)} CONTESTS
+    - {checkbox("Redemption" in data.promo_type.types)} REDEMPTION
+    - Others (specify): {data.promo_type.others_specify or 'N/A'}
+
+    ---
+    **5. COVERAGE**
+    - {checkbox(data.coverage == "NCR")} NCR
+    - {checkbox(data.coverage == "Nationwide")} NATIONWIDE
+
+    ---
+    **6. PARTICIPATING ESTABLISHMENTS**
+{participating_establishments_str}
+
+    ---
+    **7. PRODUCTS / SERVICES COVERED**
+{products_covered_str}
+
+    ---
+    **8. ATTACHMENTS CHECKLIST**
+{attachments_str}
+
+    ---
+    **UNDERTAKING SECTION**
+    - For the Sponsor (Name): {data.undertaking.sponsor_representative_name}
+    - For the Advertising Company (Name): {data.undertaking.advertising_company_representative_name or 'N/A'}
+    - Certified by (Name): {data.undertaking.certified_by_name}
+
+    **INSTRUCTIONS FOR GENERATION:**
+    1.  Create a document titled "SALES PROMOTION PERMIT APPLICATION FORM".
+    2.  Follow the numbered sections as outlined above (1. NAME OF SPONSOR, 2. NUMBER OF ADVERTISING AGENCY, etc.).
+    3.  Populate each section with the provided data.
+    4.  For section 8, list all attachments and use the [X] / [ ] format to indicate which documents are included.
+    5.  Conclude with the "UNDERTAKING" section, placing the provided names on the appropriate signature lines.
     """
