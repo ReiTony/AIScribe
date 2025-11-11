@@ -1,7 +1,7 @@
 import logging
 import json
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, Type
+from typing import Optional, Dict, Any, Type, Tuple, List
 
 from fastapi import APIRouter, HTTPException, Depends
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -22,15 +22,20 @@ from utils.chat_helpers import (
     get_user_chat_history,
     format_chat_history,
     save_chat_message,
-    build_consultation_prompt,
     combine_responses,
-    extract_document_info_from_message
 )
 from utils.document_handler import (
     detect_document_type
 )
 
-from utils.document_flow_manager import get_next_step_info, get_document_schema, get_flow_steps
+from utils.document_flow_manager import (
+    get_next_step_info, 
+    get_document_schema, 
+    get_flow_steps, is_section_complete,
+    generate_question_for_step
+)
+
+from utils.parse_helpers import parse_user_reply_for_sections
 
 router = APIRouter()
 logger = logging.getLogger("ChatRouter")
@@ -47,40 +52,8 @@ def combine_responses(consult_resp: Optional[str], doc_resp: Optional[str], inte
     return doc_resp or consult_resp or "I'm sorry, I'm not sure how to respond. Can you please clarify?"
 
 
-async def parse_section_data(user_message: str, schema: Type[BaseModel]) -> Optional[Dict]:
-    """Uses a targeted LLM call to parse user text into a specific Pydantic sub-schema."""
-    schema_json = schema.model_json_schema()
-    prompt = f"""
-    The user has provided the following text. Extract the relevant information and format it as a JSON object that strictly follows the provided schema.
-    Handle natural language (e.g., 'yesterday', 'next week') by converting to specific dates if possible.
-    Interpret words like 'yes'/'no' as booleans.
-    For lists, if the user provides one item, create a list with that single item.
 
-    **Schema:**
-    ```json
-    {schema_json}
-    ```
-
-    **User Text:**
-    ---
-    {user_message}
-    ---
-
-    Output ONLY the raw JSON object. Do not include explanations or markdown formatting.
-    """
-    persona = system_instruction("data_extractor")
-    try:
-        response = await generate_response(prompt, persona)
-        response_text = response.get("data", {}).get("response", "").strip().replace("```json", "").replace("```", "")
-        data = json.loads(response_text)
-        # Validate the extracted data before returning to ensure correctness
-        schema(**data)
-        return data
-    except (json.JSONDecodeError, ValidationError) as e:
-        logger.error(f"Failed to parse or validate section data: {e}")
-        return None
-
-# 3. THE COMPLETE, SCHEMA-DRIVEN CHAT ENDPOINT
+# Chat Route
 @router.post("/chat", tags=["Chat"])
 async def chat_endpoint(
     request: ChatRequest,
@@ -95,7 +68,7 @@ async def chat_endpoint(
         message = request.message
         session_id = request.session_id
         
-        logger.info(f"Processing chat from {username} (Session: {session_id}): {message[:150]}...")
+        logger.info(f"Processing chat from {username} (Session: {session_id}): {message}")
         
         history_docs = await get_user_chat_history(db, username, session_id, limit=5)
         history_text = format_chat_history(history_docs)
@@ -111,59 +84,83 @@ async def chat_endpoint(
                               last_assistant_message.get('state') == 'collecting_document_data')
 
         if is_collecting_data:
-            # --- PATH 1: CONTINUE DOCUMENT FLOW ---
+            # --- PATH 1: CONTINUE AN ONGOING DOCUMENT FLOW ---
+            logger.info("Continuing a document collection flow.")
+
+            # 1. Get current state from the last assistant message
             current_doc_type = last_assistant_message.get('doc_type')
-            current_section = last_assistant_message.get('current_section')
-            collected_data = last_assistant_message.get('collected_data', {})
-            
+            all_collected_data = last_assistant_message.get('collected_data', {})
             flow_steps = get_flow_steps(current_doc_type)
-            current_schema = next((schema for name, schema in flow_steps if name == current_section), None)
 
-            parsed_data = await parse_section_data(message, current_schema) if current_schema else None
-
-            if parsed_data:
-                collected_data[current_section] = parsed_data
-                next_step = get_next_step_info(current_doc_type, current_section)
-                
-                if next_step:
-                    # More sections to fill, ask the next question
-                    final_response = next_step["question"]
-                    assistant_metadata = {
-                        "state": "collecting_document_data",
-                        "doc_type": current_doc_type,
-                        "current_section": next_step["section_name"],
-                        "collected_data": collected_data
-                    }
-                else:
-                    # END OF FLOW: All sections collected. Validate and generate.
-                    try:
-                        main_schema = get_document_schema(current_doc_type)
-                        full_document_data = main_schema(**collected_data)
-                        
-                        logger.info(f"All data for '{current_doc_type}' collected and validated. Generating final document.")
-                        generation_prompt = f"""
-                        You are an expert Filipino lawyer. Draft a complete and formal '{current_doc_type.replace('_', ' ')}' using the following structured data.
-                        The document must be professional, legally sound, and ready for use.
-                        
-                        **Final Document Data (JSON):**
-                        ```json
-                        {full_document_data.model_dump_json(indent=2, by_alias=True)}
-                        ```
-                        """
-                        persona = system_instruction("lawyer")
-                        doc_result = await generate_response(generation_prompt, persona)
-                        final_response = doc_result.get("data", {}).get("response", "Error generating document.")
-                        assistant_metadata = {"state": "completed"}
-                    
-                    except ValidationError as e:
-                        logger.error(f"Final data validation failed for {current_doc_type}: {e}")
-                        final_response = "There was an issue putting all the information together. Let's try that last part again."
-                        assistant_metadata = last_assistant_message # Re-ask by reverting to previous state
+            # 2. Use the intelligent parser to extract data for ANY section from the user's reply
+            intelligently_parsed_data = await parse_user_reply_for_sections(message, flow_steps)
+            
+            if intelligently_parsed_data:
+                logger.info(f"Intelligent parser extracted data for sections: {list(intelligently_parsed_data.keys())}")
+                # 3. Merge the newly found data into our master collection
+                for section_name, section_data in intelligently_parsed_data.items():
+                    if section_name in all_collected_data:
+                        # If section already exists, update it with new key-value pairs
+                        all_collected_data[section_name].update(section_data)
+                    else:
+                        all_collected_data[section_name] = section_data
             else:
-                # Failed to parse the user's answer. Re-ask the same question.
-                last_question = last_assistant_message.get('content', "Could you please provide the information again?")
-                final_response = f"I had some trouble understanding that. Let's try again.\n\n{last_question}"
-                assistant_metadata = last_assistant_message # Preserve state to re-ask
+                logger.warning("Intelligent parser could not extract any relevant data from the user's message.")
+
+            # 4. Determine the NEXT UNFINISHED section to ask about
+            next_incomplete_section_name = None
+            next_incomplete_section_schema = None
+            for section_name, section_schema in flow_steps:
+                section_data = all_collected_data.get(section_name, {})
+                is_complete, _ = is_section_complete(section_schema, section_data)
+                if not is_complete:
+                    next_incomplete_section_name = section_name
+                    next_incomplete_section_schema = section_schema
+                    break  # We found the first section that isn't complete
+
+            if next_incomplete_section_name:
+                # 5. We still have questions. Generate the question for the next unfinished section.
+                logger.info(f"Next incomplete section is '{next_incomplete_section_name}'. Generating question.")
+                final_response = generate_question_for_step(next_incomplete_section_name, next_incomplete_section_schema)
+                
+                # Check if the user's last message was unhelpful
+                if not intelligently_parsed_data:
+                    final_response = "I wasn't able to extract any details from your last message. Let's try again. " + final_response
+
+                assistant_metadata = {
+                    "state": "collecting_document_data",
+                    "doc_type": current_doc_type,
+                    "current_section": next_incomplete_section_name, # Update the current section
+                    "collected_data": all_collected_data
+                }
+            else:
+                # 6. END OF FLOW: All sections are now complete.
+                logger.info(f"All sections for '{current_doc_type}' are complete. Proceeding to final validation and generation.")
+                try:
+                    # Final validation of the entire collected data object
+                    main_schema = get_document_schema(current_doc_type)
+                    full_document_data = main_schema(**all_collected_data)
+                    
+                    # Final document generation (LLM Call)
+                    generation_prompt = f"""
+                    You are an expert Filipino lawyer. Draft a complete and formal '{current_doc_type.replace('_', ' ')}' using the following structured data.
+                    The document must be professional, legally sound, and ready for use.
+                    
+                    **Final Document Data (JSON):**
+                    ```json
+                    {full_document_data.model_dump_json(indent=2, by_alias=True)}
+                    ```
+                    """
+                    persona = system_instruction("lawyer")
+                    doc_result = await generate_response(generation_prompt, persona)
+                    final_response = doc_result.get("data", {}).get("response", "Error: Could not generate the final document.")
+                    assistant_metadata = {"state": "completed", "doc_type": current_doc_type}
+                
+                except ValidationError as e:
+                    logger.error(f"Final data validation failed for {current_doc_type}: {e}")
+                    final_response = "There was an issue putting all the information together. It seems some details might be conflicting or missing. Could you please review the information you've provided?"
+                    # End the flow with an error to prevent a loop
+                    assistant_metadata = {"state": "failed_validation"}
 
         else:
             # --- PATH 2: NEW CONVERSATION TURN ---
@@ -222,6 +219,7 @@ async def chat_endpoint(
         logger.error(f"An unexpected error occurred in chat_endpoint: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An internal server error occurred.")
 
+# Chat History Route
 @router.get("/chat/history", response_model=ChatHistory)
 async def get_chat_history(
     current_user: dict = Depends(get_current_user),

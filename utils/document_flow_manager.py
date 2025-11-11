@@ -1,5 +1,7 @@
 from typing import Dict, List, Optional, Tuple, Type, get_origin, get_args, Literal
 from pydantic import BaseModel
+import logging 
+logger = logging.getLogger("DocumentFlowManager")
 
 # Dynamically get all schemas from your models package
 from models.documents import ALL_SCHEMAS
@@ -25,6 +27,28 @@ def get_flow_steps(doc_type: str) -> List[Tuple[str, Type[BaseModel]]]:
             steps.append((field_name, field_info.annotation))
             
     return steps
+
+
+def is_section_complete(section_schema: Type[BaseModel], collected_data: dict) -> Tuple[bool, List[str]]:
+    """
+    Checks if all required fields in a schema are present in the collected data.
+    
+    Returns:
+        - A boolean indicating if the section is complete.
+        - A list of missing required field names.
+    """
+    missing_fields = []
+    if not isinstance(collected_data, dict):
+        collected_data = {}
+    for field_name, field_info in section_schema.model_fields.items():
+        if field_info.is_required():
+            is_present = (field_name in collected_data) or \
+                         (field_info.alias and field_info.alias in collected_data)
+            
+            if not is_present:
+                missing_fields.append(field_name.replace('_', ' ').title())
+                
+    return not missing_fields, missing_fields
 
 def generate_question_for_step(section_name: str, section_schema: Type[BaseModel]) -> str:
     """
@@ -62,7 +86,8 @@ def generate_question_for_step(section_name: str, section_schema: Type[BaseModel
     # Combine everything into a single, clear question
     prompt = (
         f"Okay, let's fill out the **{section_title}** section. "
-        f"Please provide the following details:\n\n{fields_str}"
+        f"Please provide the following details:\n\n{fields_str}\n\n"
+        f"You can provide the information as a simple list or sentence."
     )
     
     return prompt
@@ -71,28 +96,35 @@ def get_next_step_info(doc_type: str, current_section_name: Optional[str] = None
     """
     Gets the information for the next step in the flow.
     If current_section_name is None, it returns the first step.
+    If there are no more steps, it returns None.
     """
     flow = get_flow_steps(doc_type)
     if not flow:
+        logger.warning(f"No flow steps defined for document type: {doc_type}")
         return None
 
     if current_section_name is None:
-        # This is the start of the flow
+        # This is the start of the flow, return the very first step.
         next_section_name, next_section_schema = flow[0]
     else:
-        # Find the current index and get the next one
-        current_index = -1
-        for i, (name, _) in enumerate(flow):
-            if name == current_section_name:
-                current_index = i
-                break
+        # Find the index of the current step to determine the next one.
+        try:
+            # Find the index of the tuple where the first element is current_section_name
+            current_index = [i for i, (name, schema) in enumerate(flow) if name == current_section_name][0]
+        except IndexError:
+            # This should not happen if the state is managed correctly, but it's a good safeguard.
+            logger.error(f"Could not find current section '{current_section_name}' in the flow for '{doc_type}'.")
+            return None
         
-        if current_index == -1 or current_index + 1 >= len(flow):
-            return None # End of the flow
-            
-        next_section_name, next_section_schema = flow[current_index + 1]
+        # Check if there is a next step
+        if current_index + 1 < len(flow):
+            # There is a next step, get its details.
+            next_section_name, next_section_schema = flow[current_index + 1]
+        else:
+            # This was the last step in the flow.
+            return None
 
-    # Generate the question for this step
+    # If we found a next step, generate its question and return the details.
     question = generate_question_for_step(next_section_name, next_section_schema)
 
     return {
