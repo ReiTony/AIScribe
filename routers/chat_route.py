@@ -221,7 +221,7 @@ async def chat_endpoint(
                         (generated_text or "I'll generate the final document next.")
                     )
                     
-                    assistant_metadata = {"state": "completed", "doc_type": current_doc_type}
+                    assistant_metadata = {"state": "completed", "doc_type": current_doc_type, "collected_data": all_collected_data}
                 
                 except ValidationError as e:
                     logger.error(f"FSM State: FAILED_VALIDATION for {current_doc_type}: {e}")
@@ -323,20 +323,20 @@ async def chat_endpoint(
         current_doc_type_for_response = assistant_metadata.get('doc_type')
         final_collected_data_nested = assistant_metadata.get("collected_data", {})
 
+        # ======================= START: FIX =======================
+        # The original code was incorrectly flattening the nested data structure,
+        # causing the `convert_to_aliased_json` to fail and return {}.
+        # The fix is to pass the original `final_collected_data_nested` directly,
+        # as Pydantic's `model_construct` can handle the nested dictionary.
+        
         aliased_collected_data = {}
         if current_doc_type_for_response and final_collected_data_nested:
-            # STEP 1: Flatten the nested FSM data structure into a single dictionary.
-            flattened_data = {}
-            for section_name, section_data in final_collected_data_nested.items():
-                if isinstance(section_data, dict):
-                    flattened_data.update(section_data)
-                    
-            # STEP 2: Now, pass the correctly structured flat data to your conversion function.
-            if flattened_data:
-                aliased_collected_data = convert_to_aliased_json(
-                    current_doc_type_for_response,
-                    flattened_data 
-                )
+            # Pass the original nested data structure directly.
+            aliased_collected_data = convert_to_aliased_json(
+                current_doc_type_for_response,
+                final_collected_data_nested
+            )
+        # ======================== END: FIX ========================
         
         # ## NEW ##: Log the data being sent back to the frontend
         logger.info(f"Returning to frontend. Response: '{final_response}', Collected Data: {json.dumps(aliased_collected_data, indent=2)}")
@@ -450,4 +450,3 @@ async def optional_auth_endpoint(current_user: Optional[dict] = Depends(get_curr
             "authenticated": False,
             "info": "You can access this endpoint without authentication, but get limited features"
         }
-    
