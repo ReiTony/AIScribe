@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple, Type, Optional
 from pydantic import BaseModel
 from llm.generate_doc_prompt import system_instruction
 from llm.llm_client import generate_response
-from utils.document_flow_manager import get_document_schema
+from utils.document_flow_manager import get_document_schema, get_flow_steps
 import logging
 
 logger = logging.getLogger("DocumentParseHelpers")
@@ -173,19 +173,41 @@ async def parse_section_data(user_message: str, schema: Type[BaseModel]) -> Opti
 
 def convert_to_aliased_json(doc_type: str, collected_data: Dict) -> Dict:
     """
-    Takes the FSM's nested collected_data and correctly builds a partial,
-    aliased Pydantic model representation.
+    Converts the FSM's internally structured data into a properly aliased
+    JSON dictionary suitable for frontend display, avoiding Pydantic warnings.
     """
     main_schema = get_document_schema(doc_type)
     if not main_schema or not collected_data:
         return {}
 
-    try:
-        # STEP 1: Let Pydantic do all the work.
-        partial_model = main_schema.model_construct(**collected_data)
+    # Create a lookup map from section_name (e.g., 'basic_info') to its schema class
+    flow_steps = get_flow_steps(doc_type)
+    schema_map = {name: schema for name, schema in flow_steps}
+    
+    final_aliased_output = {}
 
-        # STEP 2: Dump the resulting partial model to a dictionary.
-        return partial_model.model_dump(by_alias=True, exclude_unset=True)
+    try:
+        # Iterate through the sections we have collected data for
+        for section_name, section_data in collected_data.items():
+            sub_schema = schema_map.get(section_name)
+            
+            if sub_schema and isinstance(section_data, dict):
+                # 1. Create a partial model for the *subsection*
+                #    Using model_construct here is safe as section_data is a flat dict of primitives
+                partial_sub_model = sub_schema.model_construct(**section_data)
+                
+                # 2. Dump this subsection model to get its aliased dictionary representation
+                aliased_section_data = partial_sub_model.model_dump(by_alias=True, exclude_unset=True)
+                
+                # 3. Find the alias for the section itself in the main schema
+                #    (e.g., 'basic_info' might be aliased to 'basicInfo')
+                field_info = main_schema.model_fields.get(section_name)
+                output_key = field_info.alias if field_info and field_info.alias else section_name
+                
+                # 4. Add the correctly aliased section to our final output
+                final_aliased_output[output_key] = aliased_section_data
+
+        return final_aliased_output
 
     except Exception as e:
         logger.error(f"Error converting nested data to aliased JSON for '{doc_type}': {e}", exc_info=True)
