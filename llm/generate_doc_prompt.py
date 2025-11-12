@@ -142,7 +142,10 @@ def prompt_for_DemandLetter(data: DemandLetterData) -> str:
     - Interest Rate on Overdue Amount: {data.additional_info.interest_rate}%
     - Mediation Offered: {'Yes' if data.additional_info.mediation else 'No'}
 
-    Please draft the full text of the demand letter. Start with the sender's and recipient's information, followed by the date and subject. Then, write the body of the letter, incorporating all the details provided above in a clear, logical, and legally sound manner. Conclude with the sender's name and title.
+    Please draft the full text of the demand letter. Start with the sender's and recipient's information, followed by the date and subject. 
+    Then, write the body of the letter, incorporating all the details provided above in a clear, logical, and legally sound manner. Conclude with the sender's name and title.
+
+    IMPORTANT NOTE: Just return the demand letter text without any additional explanations or commentary.
     """
 
 
@@ -238,6 +241,8 @@ def prompt_for_EmploymentContract(data: EmploymentContract) -> str:
     3.  Incorporate all the details from the sections above into their respective clauses.
     4.  Conclude the document with the "IN WITNESS WHEREOF" closing, signature lines for the Employer and Employee, and lines for witnesses.
     5.  If notarization is required, include a standard Acknowledgment section for a Notary Public in the Philippines.
+
+    IMPORTANT NOTE: Just return the demand letter text without any additional explanations or commentary.
     """
 
 
@@ -327,6 +332,8 @@ def prompt_for_ServiceAgreement(data: ServiceAgreementData) -> str:
     5.  Integrate all the specific details provided above into their corresponding clauses using formal legal language.
     6.  Conclude with an "IN WITNESS WHEREOF" section, providing signature blocks for the authorized representatives of both parties.
     7.  Include space for witnesses and a standard Notarial Acknowledgment section appropriate for the specified governing law.
+
+    IMPORTANT NOTE: Just return the demand letter text without any additional explanations or commentary.
     """
 
 # First, ensure the DTI Pydantic models you created are defined in your script.
@@ -450,4 +457,6 @@ def prompt_for_DtiSalesPromoApplication(data: DtiSalesPromoApplicationData) -> s
     3.  Populate each section with the provided data.
     4.  For section 8, list all attachments and use the [X] / [ ] format to indicate which documents are included.
     5.  Conclude with the "UNDERTAKING" section, placing the provided names on the appropriate signature lines.
+
+    IMPORTANT NOTE: Just return the demand letter text without any additional explanations or commentary.
     """

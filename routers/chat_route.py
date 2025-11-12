@@ -27,6 +27,7 @@ from utils.chat_helpers import (
 )
 from utils.document_handler import (
     detect_document_type,
+    PROMPT_GENERATORS
 )
 
 from utils.document_flow_manager import (
@@ -206,9 +207,15 @@ async def chat_endpoint(
 
                     logger.info(f"FSM Final Data: {full_document_data.model_dump_json(indent=2)}")
                     # Build a strong prompt for the chosen document type
-                    if current_doc_type == 'demand_letter':
-                        generation_prompt = prompt_for_DemandLetter(full_document_data)
+                    prompt_generator_func = PROMPT_GENERATORS.get(current_doc_type)
+
+                    if prompt_generator_func:
+                        # If yes, call it with the validated Pydantic model.
+                        logger.info(f"Using specific prompt generator for '{current_doc_type}'.")
+                        generation_prompt = prompt_generator_func(full_document_data)
                     else:
+                        # If no, use the generic fallback prompt.
+                        logger.warning(f"No specific prompt generator for '{current_doc_type}'. Using generic fallback.")
                         generation_prompt = f"Please draft the {current_doc_type} using the following structured data.\n\n{json_preview}"
 
                     persona = system_instruction("lawyer")
