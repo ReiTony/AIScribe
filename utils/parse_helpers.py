@@ -3,6 +3,7 @@ from typing import Dict, List, Tuple, Type, Optional
 from pydantic import BaseModel
 from llm.generate_doc_prompt import system_instruction
 from llm.llm_client import generate_response
+from utils.document_flow_manager import get_document_schema
 import logging
 
 logger = logging.getLogger("DocumentParseHelpers")
@@ -167,4 +168,25 @@ async def parse_section_data(user_message: str, schema: Type[BaseModel]) -> Opti
     except (json.JSONDecodeError, Exception) as e:
         logger.error(f"Failed to parse section data from LLM response '{response_text}'. Error: {e}")
         # Return an empty dict on failure so the completeness check can report what's missing.
+        return {}
+    
+
+def convert_to_aliased_json(doc_type: str, collected_data: Dict) -> Dict:
+    """
+    Takes the FSM's nested collected_data and correctly builds a partial,
+    aliased Pydantic model representation.
+    """
+    main_schema = get_document_schema(doc_type)
+    if not main_schema or not collected_data:
+        return {}
+
+    try:
+        # STEP 1: Let Pydantic do all the work.
+        partial_model = main_schema.model_construct(**collected_data)
+
+        # STEP 2: Dump the resulting partial model to a dictionary.
+        return partial_model.model_dump(by_alias=True, exclude_unset=True)
+
+    except Exception as e:
+        logger.error(f"Error converting nested data to aliased JSON for '{doc_type}': {e}", exc_info=True)
         return {}
