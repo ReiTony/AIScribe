@@ -1,11 +1,13 @@
 import json
 import logging
 import re
+from pydantic import BaseModel
 from typing import Dict, Optional
 from llm.llm_client import generate_response
 from llm.consultant_prompt import get_intent_classification_instruction
 from llm.generate_doc_prompt import system_instruction
 from models.documents import ALL_SCHEMAS
+
 
 logger = logging.getLogger("IntentDetector")
 
@@ -63,7 +65,7 @@ async def detect_intent(message: str, chat_history: Optional[str] = None) -> Dic
     {chat_history or "No history available."}
     ---
 
-    Respond with a single, raw JSON object in the following format. Do not include markdown formatting like ```json.
+    Your FINAL and ONLY output must be the raw JSON object in the following format.
 
     {{
       "intent": "...",
@@ -75,8 +77,8 @@ async def detect_intent(message: str, chat_history: Optional[str] = None) -> Dic
     - User Message: "What are the rules for ejectment cases in the Philippines?" -> {{"intent": "consultation", "document_type": null, "confidence": 0.95}}
     - User Message: "Help me make a demand letter for my tenant who won't pay rent." -> {{"intent": "hybrid", "document_type": "demand_letter", "confidence": 0.9}}
     - User Message: "Generate an affidavit of loss for my wallet." -> {{"intent": "document_generation", "document_type": "affidavit_of_loss", "confidence": 0.98}}
+    - User Message: "what is a demand letter and can you create one for me?" -> {{"intent": "hybrid", "document_type": "demand_letter", "confidence": 0.95}}
     - User Message: "Thanks, that was very helpful!" -> {{"intent": "general_conversation", "document_type": null, "confidence": 0.99}}
-    - User Message: "Hello there" -> {{"intent": "general_conversation", "document_type": null, "confidence": 1.0}}
     """
 
     try:
@@ -84,14 +86,21 @@ async def detect_intent(message: str, chat_history: Optional[str] = None) -> Dic
         response_text = response.get("data", {}).get("response", "").strip()
         logger.info(f"Raw intent detection response from LLM: {response_text}")
 
-        # Clean the response in case the LLM adds markdown backticks
-        if response_text.startswith("```json"):
-            response_text = response_text[7:]
-        if response_text.endswith("```"):
-            response_text = response_text[:-3]
+        # **PARSING IMPROVEMENT**: This is the key change.
+        # We use a regular expression to find the first '{' and the last '}'
+        # This extracts the JSON object even if it's surrounded by other text.
+        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
         
-        # Parse the JSON response
-        data = json.loads(response_text)
+        if not json_match:
+            logger.error(f"Could not find any JSON object in the LLM response: '{response_text}'")
+            return DEFAULT_INTENT
+
+        json_string = json_match.group(0)
+        logger.debug(f"Extracted JSON string for parsing: {json_string}")
+
+        # Now we parse the *extracted* string, which is much more likely to be valid
+        data = json.loads(json_string)
+        
         intent = data.get("intent", "consultation").lower()
         doc_type = data.get("document_type")
         
@@ -108,12 +117,13 @@ async def detect_intent(message: str, chat_history: Optional[str] = None) -> Dic
             "is_general_conversation": intent == "general_conversation"
         }
         
-        logger.info(f"Parsed intent: {result}")
+        logger.info(f"Successfully parsed intent: {result}")
         return result
         
-    except (json.JSONDecodeError, AttributeError, KeyError) as e:
-        logger.error(f"Failed to parse intent JSON from LLM response: '{response_text}'. Error: {e}", exc_info=True)
-        # Fallback to a safe default if parsing fails
+    except json.JSONDecodeError as e:
+        # This error is now more informative. It means we found something that
+        # looked like JSON, but it was malformed.
+        logger.error(f"Failed to parse extracted JSON from LLM response: '{json_string}'. Error: {e}", exc_info=True)
         return DEFAULT_INTENT
     except Exception as e:
         logger.error(f"An unexpected error occurred during intent detection: {e}", exc_info=True)
@@ -132,3 +142,63 @@ def should_extract_document_info(message: str) -> bool:
     ]
     message_lower = message.lower()
     return any(keyword in message_lower for keyword in keywords)
+
+
+async def check_for_interrupt(message: str, current_doc_type: str, section_schema: type[BaseModel]) -> Dict:
+    """
+    Checks if a user's reply during form-filling is an interruption
+    or data for the form, using the expected schema for context.
+    """
+    
+    expected_fields = list(section_schema.model_fields.keys())
+    
+    prompt = f"""
+    You are an AI assistant helping a user fill out a form for a "{current_doc_type}".
+    You are currently asking for information to fill the fields: {expected_fields}
+
+    Analyze the user's latest reply to determine their intent.
+
+    User's Reply: "{message}"
+
+    Categorize the reply into one of the following types:
+    1.  `providing_data`: The user is providing information that is clearly relevant to the expected fields.
+    2.  `off_topic`: The user is providing data, but it seems completely unrelated to the expected fields (e.g., providing a "due date" when asked for an "employer name").
+    3.  `new_document_request`: The user is explicitly asking to create a different document.
+    4.  `cancel`: The user wants to stop or cancel the current process.
+    5.  `consultation`: The user is asking a general question, not providing data for the form.
+
+    Respond with ONLY a single, raw JSON object in this format:
+    {{
+      "intent_type": "...",
+      "new_doc_type": "..." | null
+    }}
+
+    Examples:
+    - Expected Fields: ['name', 'address', 'business_nature']
+    - User Reply: "The company is ACME Corp at 123 Main St. They are a software company." -> {{"intent_type": "providing_data", "new_doc_type": null}}
+
+    - Expected Fields: ['name', 'address', 'business_nature']
+    - User Reply: "The due date is tomorrow and the amount is $500." -> {{"intent_type": "off_topic", "new_doc_type": null}}
+
+    - Expected Fields: ['name', 'address']
+    - User Reply: "Actually, make me a demand letter instead." -> {{"intent_type": "new_document_request", "new_doc_type": "demand_letter"}}
+    
+    - Expected Fields: ['name', 'address']
+    - User Reply: "Never mind." -> {{"intent_type": "cancel", "new_doc_type": null}}
+    """
+    persona = system_instruction("You are a precise intent classification engine. Respond only with raw JSON.")
+    try:
+        response = await generate_response(prompt=prompt, persona=persona)
+        response_text = response.get("data", {}).get("response", "").strip()
+        
+        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+        if not json_match:
+            return {"intent_type": "providing_data", "new_doc_type": None}
+            
+        data = json.loads(json_match.group(0))
+        return {
+            "intent_type": data.get("intent_type", "providing_data"),
+            "new_doc_type": data.get("new_doc_type")
+        }
+    except Exception:
+        return {"intent_type": "providing_data", "new_doc_type": None}
