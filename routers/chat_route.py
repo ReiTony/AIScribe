@@ -27,18 +27,17 @@ from utils.chat_helpers import (
 )
 from utils.document_handler import (
     detect_document_type,
-    DOCUMENT_SCHEMAS
+    PROMPT_GENERATORS
 )
 
 from utils.document_flow_manager import (
-    get_next_step_info, 
     get_document_schema, 
     get_flow_steps, is_section_complete,
     generate_question_for_step,
     generate_follow_up_question
 )
 
-from utils.parse_helpers import parse_user_reply_for_sections, parse_section_data
+from utils.parse_helpers import parse_user_reply_for_sections, parse_section_data, convert_to_aliased_json
 
 router = APIRouter()
 logger = logging.getLogger("ChatRouter")
@@ -82,10 +81,13 @@ async def chat_endpoint(
         
         final_response = None
         assistant_metadata = {}
+        all_collected_data = {}
 
         # FSM Step: Check the current state. Are we filling a form?
         is_in_form_filling_state = (last_assistant_message and 
                                     last_assistant_message.get('state') == 'collecting_document_data')
+        
+        all_collected_data = copy.deepcopy(last_assistant_message.get('collected_data', {})) if is_in_form_filling_state else {}
 
         if is_in_form_filling_state:
             # --- PATH 1: CONTINUE THE FSM (FORM-FILLING) LOOP ---
@@ -93,10 +95,8 @@ async def chat_endpoint(
 
             # 1. Load context
             state_context = last_assistant_message
-            current_doc_type = DOCUMENT_SCHEMAS.get(doc_type)
+            current_doc_type = state_context.get('doc_type')
             current_section_being_filled = state_context.get('current_section') # Track what we last asked for
-            previous_data = state_context.get('collected_data', {})
-            all_collected_data = copy.deepcopy(previous_data)
             flow_steps = get_flow_steps(current_doc_type)
             flow_map = {name: schema for name, schema in flow_steps}
 
@@ -125,6 +125,7 @@ async def chat_endpoint(
                 logger.info(f"FSM Action: Storing data for sections: {list(newly_parsed_data.keys())}")
                 for section_name, section_data in newly_parsed_data.items():
                     all_collected_data.setdefault(section_name, {}).update(section_data)
+                logger.debug(f"FSM Debug: Data after merge: {json.dumps(all_collected_data, indent=2)}")
             else:
                 logger.warning("FSM Info: Parser found no relevant data.")
 
@@ -204,10 +205,17 @@ async def chat_endpoint(
                     # Show a JSON preview using alias keys to match schema expectations
                     json_preview = json.dumps(full_document_data.model_dump(by_alias=True), indent=2)
 
+                    logger.info(f"FSM Final Data: {full_document_data.model_dump_json(indent=2)}")
                     # Build a strong prompt for the chosen document type
-                    if current_doc_type == 'demand_letter':
-                        generation_prompt = prompt_for_DemandLetter(full_document_data)
+                    prompt_generator_func = PROMPT_GENERATORS.get(current_doc_type)
+
+                    if prompt_generator_func:
+                        # If yes, call it with the validated Pydantic model.
+                        logger.info(f"Using specific prompt generator for '{current_doc_type}'.")
+                        generation_prompt = prompt_generator_func(full_document_data)
                     else:
+                        # If no, use the generic fallback prompt.
+                        logger.warning(f"No specific prompt generator for '{current_doc_type}'. Using generic fallback.")
                         generation_prompt = f"Please draft the {current_doc_type} using the following structured data.\n\n{json_preview}"
 
                     persona = system_instruction("lawyer")
@@ -220,7 +228,7 @@ async def chat_endpoint(
                         (generated_text or "I'll generate the final document next.")
                     )
                     
-                    assistant_metadata = {"state": "completed", "doc_type": current_doc_type}
+                    assistant_metadata = {"state": "completed", "doc_type": current_doc_type, "collected_data": all_collected_data}
                 
                 except ValidationError as e:
                     logger.error(f"FSM State: FAILED_VALIDATION for {current_doc_type}: {e}")
@@ -239,24 +247,60 @@ async def chat_endpoint(
             if intent.get("needs_document"):
                 doc_type = intent.get('document_type')
                 if not doc_type:
-                    # This fallback is useful if the primary intent model doesn't specify the type
                     doc_type = detect_document_type(message) 
 
-                first_step = get_next_step_info(doc_type)
-                
-                if first_step:
-                    # STATE TRANSITION: NULL -> AWAITING_SECTION_1
-                    # Kick off the FSM by asking the first question
-                    logger.info(f"FSM Start: Initializing form for '{doc_type}'. Transitioning to AWAITING_{first_step['section_name'].upper()}")
-                    document_response = first_step["question"]
-                    assistant_metadata = {
-                        "state": "collecting_document_data",
-                        "doc_type": doc_type,
-                        "current_section": first_step["section_name"],
-                        "collected_data": {} # Start with an empty form
-                    }
+                if doc_type:
+                    flow_steps = get_flow_steps(doc_type)
+                    
+                    # 1. Attempt to parse the user's initial message for any available data
+                    initial_collected_data = await parse_user_reply_for_sections(message, flow_steps)
+                    if initial_collected_data:
+                        logger.info(f"FSM Start: Pre-populated data from initial message: {list(initial_collected_data.keys())}")
+                    else:
+                        initial_collected_data = {}
+
+                    # 2. Find the *next* incomplete section, just like in Path 1
+                    next_incomplete_section_name = None
+                    next_incomplete_section_schema = None
+                    
+                    for section_name, section_schema in flow_steps:
+                        section_data = initial_collected_data.get(section_name, {})
+                        is_complete, _ = is_section_complete(section_schema, section_data)
+                        if not is_complete:
+                            next_incomplete_section_name = section_name
+                            next_incomplete_section_schema = section_schema
+                            break
+                    
+                    # 3. If we found a next step, kick off the FSM
+                    if next_incomplete_section_name:
+                        logger.info(f"FSM Start: Initializing form for '{doc_type}'. Transitioning to AWAITING_{next_incomplete_section_name.upper()}")
+                        
+                        # Generate the question for the *actual* first missing piece of info
+                        question = generate_question_for_step(next_incomplete_section_name, next_incomplete_section_schema)
+                        
+                        # Let the user know we understood some of their input
+                        if initial_collected_data:
+                            filled_sections = ", ".join(f"'{s}'" for s in initial_collected_data.keys())
+                            document_response = f"Great, I've noted down the details for {filled_sections}. Now, {question[0].lower()}{question[1:]}"
+                        else:
+                            document_response = question
+
+                        # Set the initial state for the FSM
+                        assistant_metadata = {
+                            "state": "collecting_document_data",
+                            "doc_type": doc_type,
+                            "current_section": next_incomplete_section_name,
+                            "collected_data": initial_collected_data # Use pre-populated data!
+                        }
+                    else:
+                        # This case is unlikely but handles if user provides everything at once
+                        logger.info(f"User provided all data for '{doc_type}' in one go. Proceeding to finalization.")
+                        # (You would add the finalization logic from PATH 1 here if needed)
+                        document_response = "It looks like you've provided everything I need for the document. Let me process that."
+                        assistant_metadata = {"state": "processing", "doc_type": doc_type, "collected_data": initial_collected_data}
+
                 else:
-                    document_response = f"I can help with many documents, but I don't have a guided process for the '{doc_type}' document type yet."
+                    document_response = f"I can help with many documents, but I'm not sure which one you need. Could you clarify?"
 
             if intent.get("needs_consultation"):
                 logger.info("Routing to consultation...")
@@ -279,20 +323,38 @@ async def chat_endpoint(
         # --- Finalize and Save Turn ---
         # Add the original intent to the metadata for logging/analytics
         assistant_metadata['intent'] = locals().get('intent', {})
-        
+
         await save_chat_message(db, username, "user", message, {"session_id": session_id})
         await save_chat_message(db, username, "assistant", final_response, {**assistant_metadata, "session_id": session_id})
+
+        current_doc_type_for_response = assistant_metadata.get('doc_type')
+        final_collected_data_nested = assistant_metadata.get("collected_data", {})
+
+        # ======================= START: FIX =======================
+        # The original code was incorrectly flattening the nested data structure,
+        # causing the `convert_to_aliased_json` to fail and return {}.
+        # The fix is to pass the original `final_collected_data_nested` directly,
+        # as Pydantic's `model_construct` can handle the nested dictionary.
         
-        logger.info(f"Final response sent to {username} (Session: {session_id})")
-        logger.info(f"response: {final_response}")
+        aliased_collected_data = {}
+        if current_doc_type_for_response and final_collected_data_nested:
+            # Pass the original nested data structure directly.
+            aliased_collected_data = convert_to_aliased_json(
+                current_doc_type_for_response,
+                final_collected_data_nested
+            )
+        # ======================== END: FIX ========================
+        
+        # ## NEW ##: Log the data being sent back to the frontend
+        logger.info(f"Returning to frontend. Response: '{final_response}', Collected Data: {json.dumps(aliased_collected_data, indent=2)}")
+
         return {
             "response": final_response,
             "intent": locals().get('intent', {}),
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "collected_data": aliased_collected_data 
         }
         
-    except HTTPException as http_exc:
-        raise http_exc
     except Exception as e:
         logger.error(f"An unexpected error occurred in chat_endpoint: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An internal server error occurred.")
@@ -395,4 +457,3 @@ async def optional_auth_endpoint(current_user: Optional[dict] = Depends(get_curr
             "authenticated": False,
             "info": "You can access this endpoint without authentication, but get limited features"
         }
-    

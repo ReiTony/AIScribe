@@ -61,6 +61,7 @@ DOCUMENT_KEYWORDS = {
         "Kontrata para sa mga Serbisyo"
     ],
     "sales_promotion_permit": ["sales promotion permit", "promo permit", "DTI promo permit", "permit for sales promotion"]
+    # TODO: Add other document keywords here in the future
 }
 
 DOCUMENT_DETECTORS: Dict[str, Set[str]] = {
@@ -68,7 +69,7 @@ DOCUMENT_DETECTORS: Dict[str, Set[str]] = {
     "employment_contract": {"employer", "employee", "employmentDetails", "compensation"},
     "service_agreement": {"client", "provider", "servicesToBeProvided", "compensation"},
     "sales_promotion_permit": {"promoTitle", "applicationDate", "sponsor", "advertisingAgency"}
-
+    # TODO: Add other document detectors here in the future
 }
 
 def get_document_generation_collection(db: AsyncIOMotorClient):
