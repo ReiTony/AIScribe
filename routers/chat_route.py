@@ -26,7 +26,8 @@ from utils.chat_helpers import (
     combine_responses,
 )
 from utils.document_handler import (
-    detect_document_type
+    detect_document_type,
+    DOCUMENT_SCHEMAS
 )
 
 from utils.document_flow_manager import (
@@ -92,7 +93,7 @@ async def chat_endpoint(
 
             # 1. Load context
             state_context = last_assistant_message
-            current_doc_type = state_context.get('doc_type')
+            current_doc_type = DOCUMENT_SCHEMAS.get(doc_type)
             current_section_being_filled = state_context.get('current_section') # Track what we last asked for
             previous_data = state_context.get('collected_data', {})
             all_collected_data = copy.deepcopy(previous_data)
