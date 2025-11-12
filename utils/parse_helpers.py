@@ -96,27 +96,20 @@ async def parse_user_reply_for_sections(
 
 async def parse_section_data(user_message: str, schema: Type[BaseModel]) -> Optional[Dict]:
     """
-    Uses a targeted LLM call with few-shot examples to parse user text 
+    Uses a targeted LLM call with few-shot examples to parse user text
     into a specific Pydantic sub-schema. This version is more robust.
     """
     schema_json = schema.model_json_schema()
-    
-    example_fields = list(schema.model_fields.keys())
-    if len(example_fields) > 1:
-        example1 = f'"{example_fields[0]}": "value1", "{example_fields[1]}": "value2"'
-        example2 = f'"{example_fields[0]}": "another value"'
-    else:
-        example1 = f'"{example_fields[0]}": "value1"'
-        example2 = example1
 
     prompt = f"""
     You are a world-class data extraction engine. Your task is to analyze the user's text and extract information to create a JSON object that matches the provided schema's fields.
 
     **Key Instructions:**
-    - Analyze the user's text for relevant information, even if it's conversational or doesn't explicitly name the fields.
-    - Map extracted information to the correct field in the JSON schema. For example, map "the reason for the letter is unpaid rent" to the "subject" field.
-    - If a field is not mentioned in the user's text, OMIT IT from the JSON. Do not use null or invent data.
-    - Ensure the output is ONLY a raw JSON object.
+    - Analyze the user's text for relevant information.
+    - Map extracted information to the correct field in the JSON schema.
+    - If a field is not mentioned in the user's text, OMIT IT from the JSON.
+    - **Crucially, if the user's text contains NO information relevant to the schema's fields, your ONLY output MUST be an empty JSON object: {{}}.**
+    - Your output must ONLY be a raw JSON object.
 
     **JSON Schema to Follow:**
     ```json
@@ -124,17 +117,17 @@ async def parse_section_data(user_message: str, schema: Type[BaseModel]) -> Opti
     ```
 
     ---
-    **Example 1:**
+    **Example 1 (Relevant Data):**
     User Text: "The date is tomorrow and the subject is Final Warning. Urgency is high, it's for a payment demand."
     Your JSON Output: {{"letterDate": "[Date for tomorrow]", "subject": "Final Warning", "urgency": "High", "category": "Payment Demand"}}
 
-    **Example 2:**
-    User Text: "The subject is just 'Overdue Invoice'"
-    Your JSON Output: {{"subject": "Overdue Invoice"}}
+    **Example 2 (Irrelevant Data):**
+    User Text: "The employer is ACME Inc."
+    Your JSON Output: {{}}
     
-    **Example 3:**
-    User Text: "letter date: 11/15/25, Debt collection, Medium, Payment Demand"
-    Your JSON Output: {{"letterDate": "11/15/25", "subject": "Debt collection", "urgency": "Medium", "category": "Payment Demand"}}
+    **Example 3 (Partial Data):**
+    User Text: "letter date: 11/15/25, Debt collection"
+    Your JSON Output: {{"letterDate": "11/15/25", "subject": "Debt collection"}}
     ---
 
     **Now, analyze this new user text:**
@@ -151,7 +144,6 @@ async def parse_section_data(user_message: str, schema: Type[BaseModel]) -> Opti
         response = await generate_response(prompt, persona)
         response_text = response.get("data", {}).get("response", "").strip()
         
-        # Clean up potential markdown formatting from the LLM
         if response_text.startswith("```json"):
             response_text = response_text[7:]
         if response_text.endswith("```"):
@@ -167,7 +159,6 @@ async def parse_section_data(user_message: str, schema: Type[BaseModel]) -> Opti
         
     except (json.JSONDecodeError, Exception) as e:
         logger.error(f"Failed to parse section data from LLM response '{response_text}'. Error: {e}")
-        # Return an empty dict on failure so the completeness check can report what's missing.
         return {}
     
 
