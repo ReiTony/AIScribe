@@ -189,22 +189,28 @@ async def chat_endpoint(
                 flow_steps = get_flow_steps(current_doc_type)
                 flow_map = {name: schema for name, schema in flow_steps}
 
-                newly_parsed_data = await parse_user_reply_for_sections(message, flow_steps)
+                newly_parsed_data = {} 
+                
+            if current_section_being_filled:
+                expected_schema = flow_map.get(current_section_being_filled)
+                
+                if expected_schema:
+                    # KEY CHANGE: We ONLY parse the user's message against the schema
+                    # for the section we are currently asking for. This provides crucial context.
+                    parsed_data = await parse_section_data(message, expected_schema)
+                    
+                    # If the targeted parse was successful, store it.
+                    if parsed_data:
+                        newly_parsed_data[current_section_being_filled] = parsed_data
+                        logger.info(f"Successfully parsed data for section: '{current_section_being_filled}'")
 
-                if current_section_being_filled:
-                    expected_schema = flow_map.get(current_section_being_filled)
-                    if expected_schema and (
-                        not newly_parsed_data or current_section_being_filled not in newly_parsed_data
-                    ):
-                        targeted_data = await parse_section_data(message, expected_schema)
-                        if targeted_data:
-                            if not newly_parsed_data: newly_parsed_data = {}
-                            newly_parsed_data[current_section_being_filled] = targeted_data
-                
-                if newly_parsed_data:
-                    for section_name, section_data in newly_parsed_data.items():
-                        all_collected_data.setdefault(section_name, {}).update(section_data)
-                
+                # Now, safely merge the newly parsed data into our main data object.
+                # This loop is now safe because newly_parsed_data will only ever contain
+                # the key for the section we were actively collecting (e.g., 'recipientInfo').
+            if newly_parsed_data:
+                for section_name, section_data in newly_parsed_data.items():
+                    all_collected_data.setdefault(section_name, {}).update(section_data)
+                    
                 next_incomplete_section_name, next_incomplete_section_schema, missing_fields_for_next_section = (None, None, [])
                 
                 for section_name, section_schema in flow_steps:
