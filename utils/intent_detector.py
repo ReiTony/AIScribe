@@ -148,10 +148,22 @@ async def check_for_interrupt(message: str, current_doc_type: str, section_schem
     """
     Checks if a user's reply during form-filling is an interruption
     or data for the form, using the expected schema for context.
+    This version includes a heuristic override and an improved prompt.
     """
     
+    # =========================================================================
+    # >>> FIX #1: HEURISTIC OVERRIDE (Fast & Reliable) <<<
+    # Catch the most common "skip" phrases before calling the LLM.
+    # =========================================================================
+    if message.strip().lower() in ["none", "n/a", "na", "skip", "skip this", "not applicable"]:
+        return {"intent_type": "providing_data", "new_doc_type": None}
+        
     expected_fields = list(section_schema.model_fields.keys())
     
+    # =========================================================================
+    # >>> FIX #2: PROMPT ENHANCEMENT (Smarter LLM) <<<
+    # The definitions and examples have been significantly improved.
+    # =========================================================================
     prompt = f"""
     You are an AI assistant helping a user fill out a form for a "{current_doc_type}".
     You are currently asking for information to fill the fields: {expected_fields}
@@ -161,11 +173,11 @@ async def check_for_interrupt(message: str, current_doc_type: str, section_schem
     User's Reply: "{message}"
 
     Categorize the reply into one of the following types:
-    1.  `providing_data`: The user is providing information that is clearly relevant to the expected fields.
+    1.  `providing_data`: The user is attempting to provide information relevant to the fields. **Crucially, vague but valid answers for optional fields like "I don't have that", "none", or "skip this section" also fall into this category.**
     2.  `off_topic`: The user is providing data, but it seems completely unrelated to the expected fields (e.g., providing a "due date" when asked for an "employer name").
     3.  `new_document_request`: The user is explicitly asking to create a different document.
-    4.  `cancel`: The user wants to stop or cancel the current process.
-    5.  `consultation`: The user is asking a general question, not providing data for the form.
+    4.  `cancel`: The user uses strong, explicit words to stop the process, like "cancel", "stop", "end this", or "I don't want to do this anymore". **A simple "no" or "none" is NOT a cancellation request.**
+    5.  `consultation`: The user is asking a general legal question, not providing data for the form.
 
     Respond with ONLY a single, raw JSON object in this format:
     {{
@@ -177,6 +189,9 @@ async def check_for_interrupt(message: str, current_doc_type: str, section_schem
     - Expected Fields: ['name', 'address', 'business_nature']
     - User Reply: "The company is ACME Corp at 123 Main St. They are a software company." -> {{"intent_type": "providing_data", "new_doc_type": null}}
 
+    - Expected Fields: ['contract_clause', 'applicable_laws']
+    - User Reply: "none" -> {{"intent_type": "providing_data", "new_doc_type": null}}
+
     - Expected Fields: ['name', 'address', 'business_nature']
     - User Reply: "The due date is tomorrow and the amount is $500." -> {{"intent_type": "off_topic", "new_doc_type": null}}
 
@@ -184,7 +199,7 @@ async def check_for_interrupt(message: str, current_doc_type: str, section_schem
     - User Reply: "Actually, make me a demand letter instead." -> {{"intent_type": "new_document_request", "new_doc_type": "demand_letter"}}
     
     - Expected Fields: ['name', 'address']
-    - User Reply: "Never mind." -> {{"intent_type": "cancel", "new_doc_type": null}}
+    - User Reply: "Stop this process." -> {{"intent_type": "cancel", "new_doc_type": null}}
     """
     persona = system_instruction("You are a precise intent classification engine. Respond only with raw JSON.")
     try:
@@ -193,6 +208,7 @@ async def check_for_interrupt(message: str, current_doc_type: str, section_schem
         
         json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
         if not json_match:
+            # Safer default if the LLM fails to produce JSON
             return {"intent_type": "providing_data", "new_doc_type": None}
             
         data = json.loads(json_match.group(0))
@@ -201,4 +217,5 @@ async def check_for_interrupt(message: str, current_doc_type: str, section_schem
             "new_doc_type": data.get("new_doc_type")
         }
     except Exception:
+        # Failsafe for any error during the process
         return {"intent_type": "providing_data", "new_doc_type": None}
