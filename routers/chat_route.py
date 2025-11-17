@@ -82,35 +82,24 @@ async def chat_endpoint(
         
         current_state = last_assistant_message.get('state') if last_assistant_message else 'idle'
         
-        # =================================================================
-        # NEW: STATE HANDLER FOR AWAITING CONFIRMATION
-        # =================================================================
+        # STATE 1: Awaiting confirmation to switch documents
         if current_state == 'awaiting_confirmation_switch':
             logger.info("FSM State: AWAITING_CONFIRMATION_SWITCH.")
             
-            # Simple Yes/No check
             is_confirmed = any(word in message.lower() for word in ["yes", "yep", "sure", "ok", "confirm", "proceed"])
             is_denied = any(word in message.lower() for word in ["no", "nope", "cancel", "stop", "wait"])
             
             if is_confirmed:
                 new_doc_type = last_assistant_message.get('pending_doc_type')
                 logger.info(f"User confirmed switch to '{new_doc_type}'. Starting new flow.")
-                
-                # We will let the conversation fall through to the main intent detector,
-                # but we'll prime the message to ensure the correct new document is selected.
                 message = f"Yes, please start a {new_doc_type.replace('_', ' ')}."
-                current_state = 'idle' # Reset state to allow re-detection
+                current_state = 'idle' # Reset state to fall through to the intent detector
 
             elif is_denied:
                 logger.info("User denied switch. Resuming previous document flow.")
-                
-                # Restore the state from *before* the confirmation was asked.
-                # The 'previous_state' should contain everything needed to resume.
                 previous_state_data = last_assistant_message.get('previous_state', {})
                 if previous_state_data:
                     assistant_metadata = previous_state_data
-                    
-                    # Re-ask the last question to get the user back on track
                     last_doc = previous_state_data.get('doc_type', 'document')
                     last_section = previous_state_data.get('current_section')
                     flow_steps = get_flow_steps(last_doc)
@@ -120,7 +109,7 @@ async def chat_endpoint(
                     if last_section and last_schema:
                          question = generate_question_for_step(last_section, last_schema)
                          final_response = f"Okay, let's continue with the {last_doc.replace('_', ' ')}. {question}"
-                    else: # Fallback
+                    else:
                          final_response = "Okay, what would you like to do next?"
                          assistant_metadata = {"state": "idle"}
                 else:
@@ -128,91 +117,75 @@ async def chat_endpoint(
                     assistant_metadata = {"state": "idle"}
             else:
                 final_response = "Sorry, I didn't quite understand. Do you want to switch to the new document? Please answer with 'yes' or 'no'."
-                # Keep the same state, just re-ask
                 assistant_metadata = last_assistant_message
 
-        # =================================================================
-        # MODIFIED: INTERRUPT HANDLING LOGIC
-        # =================================================================
+        # STATE 2: Actively collecting data for a document
         elif current_state == 'collecting_document_data':
             logger.info("FSM State: AWAITING_DATA. Checking for interruptions.")
+            
+            # These variables are needed for interrupt checks
             current_doc_type = last_assistant_message.get('doc_type')
             current_section = last_assistant_message.get('current_section')
-            
             flow_steps = get_flow_steps(current_doc_type)
             flow_map = {name: schema for name, schema in flow_steps}
             section_schema = flow_map.get(current_section)
 
-            interrupt = {"intent_type": "providing_data"}
-            if section_schema:
-                interrupt = await check_for_interrupt(message, current_doc_type, section_schema)
-            
+            interrupt = await check_for_interrupt(message, current_doc_type, section_schema)
             intent_type = interrupt.get("intent_type")
             logger.info(f"Interrupt check result: {intent_type}")
             
-            # --- Start of the main logic inside this 'elif' block ---
             should_continue_form_filling = (intent_type == "providing_data")
 
+            # Handle various interruptions before proceeding
             if intent_type == "cancel":
                 final_response = "Okay, I've cancelled the document creation process. How can I help you with something else?"
                 assistant_metadata = {"state": "idle"}
             
             elif intent_type == "off_topic":
                 final_response = f"That doesn't seem to be the information I need for the '{current_section.replace('_',' ').title()}' section. Shall we continue, or would you like to do something else?"
-                assistant_metadata = last_assistant_message # Stay in the same state
+                assistant_metadata = last_assistant_message
             
             elif intent_type == "new_document_request":
                 new_doc_type = interrupt.get("new_doc_type", "new document")
                 logger.info(f"User requested to switch to '{new_doc_type}'. Asking for confirmation.")
                 final_response = f"It looks like you want to start a new document ('{new_doc_type.replace('_', ' ')}'). Are you sure you want to stop creating the current '{current_doc_type.replace('_', ' ')}'?"
-                
-                # The crucial part: set the new state and store context
                 assistant_metadata = {
                     "state": "awaiting_confirmation_switch",
                     "pending_doc_type": new_doc_type,
-                    "previous_state": last_assistant_message # Save the entire last state to revert to
+                    "previous_state": last_assistant_message
                 }
             
             elif intent_type == "consultation":
-                # Fall through to the main intent detector by setting state to idle
                 current_state = 'idle'
-                logger.info("User interrupted with a consultation question.")
-                
+                logger.info("User interrupted with a consultation question. Resetting to main intent detection.")
+            
+            # This is the main path for filling out the document form
             if should_continue_form_filling:
-                # --- The entire "PATH 1: CONTINUE THE FSM" logic goes here ---
-                # (This block remains unchanged from the previous version)
                 logger.info("Continuing document collection flow.")
                 all_collected_data = copy.deepcopy(last_assistant_message.get('collected_data', {}))
-                state_context = last_assistant_message
-                current_doc_type = state_context.get('doc_type')
-                current_section_being_filled = state_context.get('current_section') 
+                
+                # KEY FIX: Define these variables here to ensure they are correctly scoped for this entire block
+                current_doc_type = last_assistant_message.get('doc_type')
+                current_section_being_filled = last_assistant_message.get('current_section') 
                 flow_steps = get_flow_steps(current_doc_type)
                 flow_map = {name: schema for name, schema in flow_steps}
-
+                
+                # --- 1. Parse the user's reply for the current section ---
                 newly_parsed_data = {} 
-                
-            if current_section_being_filled:
-                expected_schema = flow_map.get(current_section_being_filled)
-                
-                if expected_schema:
-                    # KEY CHANGE: We ONLY parse the user's message against the schema
-                    # for the section we are currently asking for. This provides crucial context.
-                    parsed_data = await parse_section_data(message, expected_schema)
-                    
-                    # If the targeted parse was successful, store it.
-                    if parsed_data:
-                        newly_parsed_data[current_section_being_filled] = parsed_data
-                        logger.info(f"Successfully parsed data for section: '{current_section_being_filled}'")
+                if current_section_being_filled:
+                    expected_schema = flow_map.get(current_section_being_filled)
+                    if expected_schema:
+                        parsed_data = await parse_section_data(message, expected_schema)
+                        if parsed_data:
+                            newly_parsed_data[current_section_being_filled] = parsed_data
+                            logger.info(f"Successfully parsed data for section: '{current_section_being_filled}'")
 
-                # Now, safely merge the newly parsed data into our main data object.
-                # This loop is now safe because newly_parsed_data will only ever contain
-                # the key for the section we were actively collecting (e.g., 'recipientInfo').
-            if newly_parsed_data:
-                for section_name, section_data in newly_parsed_data.items():
-                    all_collected_data.setdefault(section_name, {}).update(section_data)
-                    
-                next_incomplete_section_name, next_incomplete_section_schema, missing_fields_for_next_section = (None, None, [])
+                if newly_parsed_data:
+                    for section_name, section_data in newly_parsed_data.items():
+                        all_collected_data.setdefault(section_name, {}).update(section_data)
                 
+                # --- 2. Find the next section that is still incomplete ---
+                next_incomplete_section_name, next_incomplete_section_schema, missing_fields_for_next_section = (None, None, [])
                 for section_name, section_schema in flow_steps:
                     if section_name not in all_collected_data:
                         next_incomplete_section_name, next_incomplete_section_schema = section_name, section_schema
@@ -222,17 +195,21 @@ async def chat_endpoint(
                         next_incomplete_section_name, next_incomplete_section_schema, missing_fields_for_next_section = section_name, section_schema, missing_fields
                         break
 
+                # --- 3. Decide what to do next: ask another question or finish ---
                 if next_incomplete_section_name:
                     is_stuck_on_same_section = (current_section_being_filled == next_incomplete_section_name)
                     if next_incomplete_section_name not in all_collected_data:
                         all_collected_data[next_incomplete_section_name] = {}
+                    
                     if is_stuck_on_same_section and newly_parsed_data.get(next_incomplete_section_name):
                         final_response = generate_follow_up_question(next_incomplete_section_name, next_incomplete_section_schema, missing_fields_for_next_section)
                     else:
                         question = generate_question_for_step(next_incomplete_section_name, next_incomplete_section_schema)
-                        final_response = "I wasn't able to extract any details from that. Let's try again. " + question if not newly_parsed_data and is_stuck_on_same_section else question
+                        final_response = question
+                    
                     assistant_metadata = {"state": "collecting_document_data", "doc_type": current_doc_type, "current_section": next_incomplete_section_name, "collected_data": all_collected_data}
-                else:
+                
+                else: # All sections are complete
                     logger.info(f"FSM End: All slots for '{current_doc_type}' are filled.")
                     try:
                         main_schema = get_document_schema(current_doc_type)
@@ -240,28 +217,34 @@ async def chat_endpoint(
                         json_preview = json.dumps(full_document_data.model_dump(by_alias=True), indent=2)
                         
                         prompt_generator_func = PROMPT_GENERATORS.get(current_doc_type)
-
-                        if prompt_generator_func:
-                            # If yes, call it with the validated Pydantic model.
-                            logger.info(f"Using specific prompt generator for '{current_doc_type}'.")
-                            generation_prompt = prompt_generator_func(full_document_data)
-                        else:
-                            logger.warning(f"No specific prompt generator for '{current_doc_type}'. Using generic fallback.")
-                            generation_prompt = f"Please draft the {current_doc_type} using the following structured data.\n\n{json_preview}"
+                        generation_prompt = prompt_generator_func(full_document_data) if prompt_generator_func else f"Draft the {current_doc_type} using:\n\n{json_preview}"
                         
                         persona = system_instruction("lawyer")
                         doc_result = await generate_response(generation_prompt, persona)
                         generated_text = doc_result.get("data", {}).get("response", "")
                         final_response = f"Great — I have everything I need. Here's the structured data I'll use:\n```json\n{json_preview}\n```\n\n{generated_text or 'I will generate the final document next.'}"
                         assistant_metadata = {"state": "completed", "doc_type": current_doc_type, "collected_data": all_collected_data}
+                    
                     except ValidationError as e:
                         logger.error(f"FSM State: FAILED_VALIDATION for {current_doc_type}: {e}")
-                        final_response = "There was an issue putting all the information together..."
-                        assistant_metadata = {"state": "failed_validation"}
+                        final_response = "There was an issue putting all the information together. Could you please review the last piece of information you provided?"
+                        assistant_metadata = last_assistant_message # Revert to last good state
 
-        # =================================================================
-        # GENERAL INTENT DETECTION (handles new conversations, confirmed switches, and consultations)
-        # =================================================================
+                # --- 4. KEY FIX: The Fallback Safety Net ---
+                # This catches cases where the parser returned empty data (e.g., from "none").
+                # It is correctly placed INSIDE the 'collecting_document_data' logic.
+                if not final_response:
+                    logger.warning(f"Parser returned no data for section '{current_section_being_filled}'. Re-prompting user.")
+                    
+                    current_schema = flow_map.get(current_section_being_filled)
+                    question = generate_question_for_step(current_section_being_filled, current_schema) if current_schema else ""
+                    final_response = f"I'm sorry, I wasn't able to get any details from that. Let's try the **{current_section_being_filled.replace('_', ' ').title()}** section again.\n\n{question}"
+                    
+                    # Maintain the current state instead of resetting
+                    assistant_metadata = last_assistant_message
+
+        # STATE 3: General Intent Detection (for new conversations or resets)
+        # This block will ONLY run if no response was generated by the states above.
         if not final_response:
             logger.info("FSM State: AWAITING_INTENT. Starting a new conversation turn.")
             intent = await detect_intent(message, history_text)
@@ -273,7 +256,6 @@ async def chat_endpoint(
             if intent.get("needs_document"):
                 doc_type = intent.get('document_type') or detect_document_type(message)
                 if doc_type:
-                    # (This entire block is the same as before)
                     flow_steps = get_flow_steps(doc_type)
                     initial_collected_data = await parse_user_reply_for_sections(message, flow_steps)
                     next_incomplete_section_name, next_incomplete_section_schema = None, None
@@ -281,6 +263,7 @@ async def chat_endpoint(
                         if not is_section_complete(section_schema, initial_collected_data.get(section_name, {}))[0]:
                             next_incomplete_section_name, next_incomplete_section_schema = section_name, section_schema
                             break
+                    
                     if next_incomplete_section_name:
                         question = generate_question_for_step(next_incomplete_section_name, next_incomplete_section_schema)
                         if initial_collected_data:
@@ -290,6 +273,7 @@ async def chat_endpoint(
                             document_response = question
                         assistant_metadata = {"state": "collecting_document_data", "doc_type": doc_type, "current_section": next_incomplete_section_name, "collected_data": initial_collected_data}
                     else:
+                        # User provided everything in the first message - a rare case
                         document_response = "It looks like you've provided everything I need."
                         assistant_metadata = {"state": "processing", "doc_type": doc_type, "collected_data": initial_collected_data}
                 else:
@@ -307,7 +291,7 @@ async def chat_endpoint(
             if not final_response:
                 final_response = "I'm sorry, I'm not sure how to help with that. Could you rephrase?"
 
-        # --- Finalize and Save Turn ---
+        # --- Finalize and Save the conversation turn ---
         assistant_metadata['intent'] = locals().get('intent', {})
         await save_chat_message(db, username, "user", message, {"session_id": session_id})
         await save_chat_message(db, username, "assistant", final_response, {**assistant_metadata, "session_id": session_id})
@@ -330,6 +314,7 @@ async def chat_endpoint(
     except Exception as e:
         logger.error(f"An unexpected error occurred in chat_endpoint: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An internal server error occurred.")
+
     
 # Chat History Route
 @router.get("/chat/history", response_model=ChatHistory)
