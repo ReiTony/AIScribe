@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # Routers
 from routers.auth_route import router as auth_router
 from routers.chat_route import router as chat_router
+# from routers.chat_route_test import router as chat_router
 from routers.generate_doc import router as generate_doc_router
 
 # Logging Configuration

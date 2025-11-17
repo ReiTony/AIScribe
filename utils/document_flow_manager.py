@@ -163,3 +163,102 @@ def generate_follow_up_question(section_name: str, section_schema: Type[BaseMode
         prompt = f"Thanks! For the **{section_title}** section, could you please also provide the **{missing_fields[0]}**?"
 
     return prompt
+
+def has_required_fields(schema: Type[BaseModel]) -> bool:
+    """
+    Checks if a Pydantic schema contains any fields that are not optional
+    (i.e., they do not have a default value and are not explicitly Optional).
+    """
+    for field_info in schema.model_fields.values():
+        if field_info.is_required():
+            return True
+    return False
+
+def get_missing_optional_fields(section_schema: Type[BaseModel], collected_data: Dict) -> List[str]:
+    """
+    Returns a list of optional field names (user-friendly formatted) that are
+    currently missing from the provided collected_data for the given section schema.
+
+    A field is considered "missing optional" if:
+    - It is NOT required (field_info.is_required() is False), and
+    - It is not present in collected_data using either the pythonic name or the alias.
+
+    Notes:
+    - We do not attempt to infer defaults; the goal is to politely offer the user
+      a chance to add helpful optional details if they haven't provided them.
+    """
+    if not isinstance(collected_data, dict):
+        collected_data = {}
+
+    missing: List[str] = []
+    for field_name, field_info in section_schema.model_fields.items():
+        if field_info.is_required():
+            continue
+
+        present = (field_name in collected_data) or (
+            bool(field_info.alias) and field_info.alias in collected_data
+        )
+        if not present:
+            missing.append(field_name.replace('_', ' ').title())
+
+    return missing
+
+def generate_optional_fields_prompt(section_name: str, optional_fields: List[str]) -> str:
+    """
+    Builds a succinct prompt offering the user to provide optional fields
+    before moving on. Lists up to a handful of optional fields.
+    """
+    section_title = section_name.replace('_', ' ').title()
+    if not optional_fields:
+        return (
+            f"If you have any additional optional details for the **{section_title}** section, "
+            f"you can share them now, or say 'skip' to continue."
+        )
+
+    # Keep the list compact; show up to 5 optional fields
+    display_fields = optional_fields[:5]
+    if len(display_fields) > 1:
+        fields_list = ", ".join(display_fields[:-1]) + f" and {display_fields[-1]}"
+    else:
+        fields_list = display_fields[0]
+
+    return (
+        f"Before we move on, you can also include optional details for the **{section_title}** section: "
+        f"the **{fields_list}**.\n\nDo you want to continue to next section?"
+    )
+
+def generate_edit_menu(collected_data: dict) -> str:
+    """
+    Generates a user-friendly message listing the filled sections and their data,
+    allowing the user to select an item to edit.
+    """
+    if not collected_data:
+        return "It looks like we haven't collected any information yet. What would you like to do?"
+
+    menu_items = []
+    for section_name, section_data in collected_data.items():
+        if not section_data:
+            continue
+        
+        section_title = section_name.replace('_', ' ').title()
+        menu_items.append(f"**{section_title}**:")
+        
+        for field_name, field_value in section_data.items():
+            field_title = field_name.replace('_', ' ').title()
+            # Truncate long values for display
+            display_value = (str(field_value)[:75] + '...') if len(str(field_value)) > 75 else field_value
+            menu_items.append(f"- {field_title}: *{display_value}*")
+        menu_items.append("") # Add a blank line for spacing
+
+    if not menu_items:
+        return "We haven't recorded any specific details yet. What would you like to provide?"
+
+    menu_str = "\n".join(menu_items)
+    
+    prompt = (
+        "Okay, what would you like to edit? Here's the information I have so far:\n\n"
+        f"{menu_str}"
+        "Please tell me which section you want to change, for example: 'edit sender info' or 'change the letter date'."
+    )
+    
+    return prompt

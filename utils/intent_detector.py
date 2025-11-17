@@ -146,24 +146,24 @@ def should_extract_document_info(message: str) -> bool:
 
 async def check_for_interrupt(message: str, current_doc_type: str, section_schema: type[BaseModel]) -> Dict:
     """
-    Checks if a user's reply during form-filling is an interruption
+    Checks if a user's reply during form-filling is an interruption, a request to edit,
     or data for the form, using the expected schema for context.
-    This version includes a heuristic override and an improved prompt.
     """
+   
+    message_lower = message.strip().lower()
     
-    # =========================================================================
-    # >>> FIX #1: HEURISTIC OVERRIDE (Fast & Reliable) <<<
-    # Catch the most common "skip" phrases before calling the LLM.
-    # =========================================================================
-    if message.strip().lower() in ["none", "n/a", "na", "skip", "skip this", "not applicable"]:
-        return {"intent_type": "providing_data", "new_doc_type": None}
+    # Heuristic for skipping/providing empty data
+    skip_phrases = ["none", "n/a", "na", "skip", "skip this", "not applicable"]
+    if message_lower in skip_phrases:
+        return {"intent_type": "providing_data"} # Removed new_doc_type for simplicity
+
+    # Heuristic for edit requests
+    edit_phrases = ["edit", "change", "correct", "update", "i made a mistake", "go back"]
+    if any(phrase in message_lower for phrase in edit_phrases):
+        return {"intent_type": "edit_request"}
         
     expected_fields = list(section_schema.model_fields.keys())
     
-    # =========================================================================
-    # >>> FIX #2: PROMPT ENHANCEMENT (Smarter LLM) <<<
-    # The definitions and examples have been significantly improved.
-    # =========================================================================
     prompt = f"""
     You are an AI assistant helping a user fill out a form for a "{current_doc_type}".
     You are currently asking for information to fill the fields: {expected_fields}
@@ -173,33 +173,31 @@ async def check_for_interrupt(message: str, current_doc_type: str, section_schem
     User's Reply: "{message}"
 
     Categorize the reply into one of the following types:
-    1.  `providing_data`: The user is attempting to provide information relevant to the fields. **Crucially, vague but valid answers for optional fields like "I don't have that", "none", or "skip this section" also fall into this category.**
-    2.  `off_topic`: The user is providing data, but it seems completely unrelated to the expected fields (e.g., providing a "due date" when asked for an "employer name").
-    3.  `new_document_request`: The user is explicitly asking to create a different document.
-    4.  `cancel`: The user uses strong, explicit words to stop the process, like "cancel", "stop", "end this", or "I don't want to do this anymore". **A simple "no" or "none" is NOT a cancellation request.**
-    5.  `consultation`: The user is asking a general legal question, not providing data for the form.
+    1.  `providing_data`: The user is providing information that could be relevant to the fields. Vague but valid answers for optional fields like "I don't have that", "none", or "skip this section" also fall into this category.
+    2.  `edit_request`: The user wants to change, correct, or edit information they have already provided. Phrases like "I want to change the address" or "wait, I made a mistake" indicate this intent.
+    3.  `new_document_request`: The user is explicitly asking to create a different type of document.
+    4.  `cancel`: The user uses strong, explicit words to stop the entire process, like "cancel", "stop", or "end this". A simple "no" or "none" is NOT a cancellation request.
+    5.  `consultation`: The user is asking a general legal question that is not data for the form.
+    6.  `off_topic`: The user is providing data, but it is completely unrelated to the expected fields (e.g., providing a "due date" when asked for "employer name").
 
     Respond with ONLY a single, raw JSON object in this format:
     {{
-      "intent_type": "...",
-      "new_doc_type": "..." | null
+    "intent_type": "...",
+    "new_doc_type": "..." | null
     }}
 
     Examples:
-    - Expected Fields: ['name', 'address', 'business_nature']
-    - User Reply: "The company is ACME Corp at 123 Main St. They are a software company." -> {{"intent_type": "providing_data", "new_doc_type": null}}
-
-    - Expected Fields: ['contract_clause', 'applicable_laws']
-    - User Reply: "none" -> {{"intent_type": "providing_data", "new_doc_type": null}}
-
-    - Expected Fields: ['name', 'address', 'business_nature']
-    - User Reply: "The due date is tomorrow and the amount is $500." -> {{"intent_type": "off_topic", "new_doc_type": null}}
+    - Expected Fields: ['name', 'address']
+    - User Reply: "The company is ACME Corp at 123 Main St." -> {{"intent_type": "providing_data", "new_doc_type": null}}
 
     - Expected Fields: ['name', 'address']
-    - User Reply: "Actually, make me a demand letter instead." -> {{"intent_type": "new_document_request", "new_doc_type": "demand_letter"}}
-    
+    - User Reply: "Wait, can I change the letter date I gave you?" -> {{"intent_type": "edit_request", "new_doc_type": null}}
+
     - Expected Fields: ['name', 'address']
-    - User Reply: "Stop this process." -> {{"intent_type": "cancel", "new_doc_type": null}}
+    - User Reply: "Actually, make me an affidavit instead." -> {{"intent_type": "new_document_request", "new_doc_type": "affidavit_of_loss"}}
+        
+    - Expected Fields: ['name', 'address']
+    - User Reply: "Stop everything." -> {{"intent_type": "cancel", "new_doc_type": null}}
     """
     persona = system_instruction("You are a precise intent classification engine. Respond only with raw JSON.")
     try:
@@ -208,14 +206,15 @@ async def check_for_interrupt(message: str, current_doc_type: str, section_schem
         
         json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
         if not json_match:
-            # Safer default if the LLM fails to produce JSON
-            return {"intent_type": "providing_data", "new_doc_type": None}
+            # Default to providing_data if the LLM fails to produce valid JSON.
+            return {"intent_type": "providing_data"}
             
         data = json.loads(json_match.group(0))
+        # Ensure we always return a valid structure.
         return {
             "intent_type": data.get("intent_type", "providing_data"),
             "new_doc_type": data.get("new_doc_type")
         }
     except Exception:
-        # Failsafe for any error during the process
-        return {"intent_type": "providing_data", "new_doc_type": None}
+        # Failsafe for any error during the LLM call or JSON parsing.
+        return {"intent_type": "providing_data"}
