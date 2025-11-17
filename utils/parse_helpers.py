@@ -203,3 +203,38 @@ def convert_to_aliased_json(doc_type: str, collected_data: Dict) -> Dict:
     except Exception as e:
         logger.error(f"Error converting nested data to aliased JSON for '{doc_type}': {e}", exc_info=True)
         return {}
+    
+async def parse_edit_selection(message: str, available_sections: List[str]) -> Optional[str]:
+    """
+    Uses an LLM to determine which section the user wants to edit from their message.
+    """
+    # Create a comma-separated list of the section keys (e.g., "basic_info, sender_info")
+    section_keys_str = ", ".join(available_sections)
+
+    systemInstruction =  " You are an expert at understanding user intents to edit document sections. " 
+    
+    prompt = f"""
+    A user wants to edit a piece of information in a document.
+    Here are the available sections they can edit: [{section_keys_str}]
+    
+    The user said: "{message}"
+    
+    Your task is to identify which of the available sections the user wants to edit.
+    Respond with ONLY the section key from the provided list.
+    For example, if the user says "change the sender's name", and "sender_info" is in the list, you should respond with "sender_info".
+    If you cannot determine the section, respond with "None".
+    """
+    
+    # This assumes you have a simple LLM call function. Replace with your actual implementation.
+    # We are not using generate_response here as this is a simple, non-streaming task.
+    from llm.llm_client import generate_response 
+    
+    result = await generate_response(prompt, systemInstruction) # You'll need to implement this
+    
+    cleaned_result = result.strip().replace("'", "").replace('"', '')
+    if cleaned_result in available_sections:
+        logger.info(f"Parsed edit selection: User wants to edit '{cleaned_result}'")
+        return cleaned_result
+    else:
+        logger.warning(f"Could not parse edit selection from user message. LLM returned: '{cleaned_result}'")
+        return None

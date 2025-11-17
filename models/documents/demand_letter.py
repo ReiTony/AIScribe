@@ -80,7 +80,7 @@ class DemandLetterData(BaseModel):
     sender_info: SenderInfo = Field(..., alias='senderInfo')
     recipient_info: RecipientInfo = Field(..., alias='recipientInfo')
     demand_info: DemandInfo = Field(..., alias='demandInfo')
-    legal_basis: LegalBasis = Field(..., alias='legalBasis')
+    legal_basis: LegalBasis = Field(..., alias='legalBasis', description="List of file names for evidence documents. The user should be prompted to upload files for this.")
     demands: Demands = Field(..., alias='demands')
     additional_info: AdditionalInfo = Field(..., alias='additionalInfo')
     signature_info: SignatureInfo = Field(..., alias='signatureInfo')
