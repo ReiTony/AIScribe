@@ -2,23 +2,21 @@ import logging
 import json
 import copy
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, Type, Tuple, List
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, ValidationError
 
-from llm.generate_doc_prompt import system_instruction, prompt_for_DemandLetter
+from llm.generate_doc_prompt import system_instruction
 from llm.llm_client import generate_response
 from llm.consultant_prompt import (
-    get_philippine_law_consultant_prompt,
     get_consultation_with_history_prompt
 )
 from db.connection import get_db
 from utils.encryption import get_current_user, get_current_user_optional
-from models.chat_schema import ChatMessage, ChatResponse, ChatHistory, ChatRequest
-from models.documents.demand_letter import DemandLetterData
-from utils.intent_detector import detect_intent, should_extract_document_info, check_for_interrupt
+from models.chat_schema import ChatHistory, ChatRequest
+from utils.intent_detector import detect_intent, check_for_interrupt
 from utils.chat_helpers import (
     get_user_chat_history,
     format_chat_history,
@@ -91,10 +89,11 @@ async def chat_endpoint(
         # --- 2. Global Interrupt Handler ---
         # Checks for "escape" intents (edit, cancel, etc.) that should work from any waiting state.
         is_interruptable_state = current_state in [
-            'collecting_document_data', 'awaiting_skip_confirmation', 
-            'awaiting_confirmation_switch', 'awaiting_edit_selection'
+            'collecting_document_data', 
+            'awaiting_skip_confirmation', 
+            'awaiting_confirmation_switch'
         ]
-        
+                
         if last_assistant_message and is_interruptable_state:
             interrupt_doc_type = last_assistant_message.get('doc_type', 'document')
             interrupt_section = last_assistant_message.get('current_section')

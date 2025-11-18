@@ -236,10 +236,26 @@ async def parse_edit_selection(message: str, available_sections: List[str]) -> O
     
     result = await generate_response(prompt, systemInstruction) # You'll need to implement this
     
-    cleaned_result = result.strip().replace("'", "").replace('"', '')
+    response_text = ""
+    if isinstance(result, dict):
+        response_text = result.get("data", {}).get("response", "")
+    elif isinstance(result, str):
+        # Add a fallback just in case it ever returns a raw string
+        response_text = result
+    
+    if not response_text:
+        logger.warning("Could not extract a valid text response from LLM output.")
+        return None
+
+    # Now that we are sure `response_text` is a string, we can process it.
+    cleaned_result = response_text.strip().replace("'", "").replace('"', '')
+    
     if cleaned_result in available_sections:
         logger.info(f"Parsed edit selection: User wants to edit '{cleaned_result}'")
         return cleaned_result
     else:
-        logger.warning(f"Could not parse edit selection from user message. LLM returned: '{cleaned_result}'")
+        logger.warning(
+            f"Could not parse edit selection. LLM returned: '{cleaned_result}', "
+            f"which is not in the available sections: {available_sections}"
+        )
         return None
