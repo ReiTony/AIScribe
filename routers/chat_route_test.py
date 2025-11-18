@@ -30,7 +30,8 @@ from utils.document_handler import (
 
 from utils.document_flow_manager import (
     get_document_schema, 
-    get_flow_steps, is_section_complete,
+    get_flow_steps, 
+    is_section_complete,
     generate_question_for_step,
     generate_follow_up_question,
     has_required_fields,
@@ -43,7 +44,13 @@ from utils.parse_helpers import (
     parse_user_reply_for_sections, 
     parse_section_data, 
     convert_to_aliased_json,
-    parse_edit_selection
+    parse_edit_selection,
+    wants_to_skip,
+    is_ack,
+    first_incomplete_required_section,
+    seed_empty_required_sections,
+    enforce_required_fields,
+    is_effectively_complete
 )
 
 router = APIRouter()
@@ -131,159 +138,150 @@ async def chat_endpoint(
             match current_state:
                 case 'awaiting_skip_confirmation':
                     logger.info("FSM State: AWAITING_SKIP_CONFIRMATION.")
-                    is_confirmed_skip = any(word in message.lower() for word in ["yes", "yep", "skip", "continue", "confirm"])
-                    is_denied_skip = any(word in message.lower() for word in ["no", "nope", "wait", "don't skip"])
+                    section_to_skip = last_assistant_message.get('current_section')
+                    all_collected_data = copy.deepcopy(last_assistant_message.get('collected_data', {}))
+                    current_doc_type = last_assistant_message.get('doc_type')
+                    flow_steps = get_flow_steps(current_doc_type)
+                    schema_map = {name: schema for name, schema in flow_steps}
+                    current_schema = schema_map.get(section_to_skip)
+                    pending_optional_fields = last_assistant_message.get('pending_optional_fields') or []
 
-                    if is_confirmed_skip:
-                        section_to_skip = last_assistant_message.get('current_section')
-                        all_collected_data = copy.deepcopy(last_assistant_message.get('collected_data', {}))
-                        current_doc_type = last_assistant_message.get('doc_type')
-                        flow_steps = get_flow_steps(current_doc_type)
-
-                        # Guard: if this section has required fields that are not satisfied, do NOT allow skipping
-                        schema_map = {name: schema for name, schema in flow_steps}
-                        current_schema = schema_map.get(section_to_skip)
-                        can_skip = True
-                        if current_schema and has_required_fields(current_schema):
-                            complete, _ = is_section_complete(current_schema, all_collected_data.get(section_to_skip, {}))
-                            if not complete:
-                                can_skip = False
-
-                        if not can_skip:
-                            logger.info(f"Skip denied: section '{section_to_skip}' has required fields not provided.")
-                            question = generate_question_for_step(section_to_skip, current_schema)
-                            final_response = (
-                                f"I'm sorry, the **{section_to_skip.replace('_',' ').title()}** section contains required information and can't be skipped.\n\n{question}"
-                            )
-                            assistant_metadata = {"state": "collecting_document_data", "doc_type": current_doc_type, "current_section": section_to_skip, "collected_data": all_collected_data}
+                    # If user clearly wants to skip, do it immediately
+                    if wants_to_skip(message):
+                        logger.info(f"User chose to skip optional fields for '{section_to_skip}'.")
+                        # If section absent and is required top-level but internally has no required fields, seed it now
+                        main_schema_for_skip = get_document_schema(current_doc_type)
+                        if main_schema_for_skip and section_to_skip not in all_collected_data:
+                            field_info = main_schema_for_skip.model_fields.get(section_to_skip)
+                            if field_info and field_info.is_required():
+                                inner_required = []
+                                if current_schema:
+                                    inner_required = [f for f, fi in current_schema.model_fields.items() if fi.is_required()]
+                                if len(inner_required) == 0:
+                                    try:
+                                        seeded = current_schema() if current_schema else None
+                                        if seeded:
+                                            all_collected_data[section_to_skip] = seeded.model_dump(by_alias=True, exclude_unset=True)
+                                            logger.info(f"Seeded skipped required section '{section_to_skip}' with empty defaults.")
+                                    except Exception as e:
+                                        logger.warning(f"Failed to seed skipped section '{section_to_skip}': {e}")
+                        # Seed any other required-but-empty sections before advancing
+                        if main_schema_for_skip:
+                            seed_empty_required_sections(main_schema_for_skip, all_collected_data, flow_steps)
+                        # Move to next section or finalize
+                        current_index = next((i for i, (n, _) in enumerate(flow_steps) if n == section_to_skip), -1)
+                        if 0 <= current_index < len(flow_steps) - 1:
+                            next_section_name, next_section_schema = flow_steps[current_index + 1]
+                            question = generate_question_for_step(next_section_name, next_section_schema)
+                            final_response = f"Okay, skipping optional details. {question}"
+                            assistant_metadata = {
+                                "state": "collecting_document_data",
+                                "doc_type": current_doc_type,
+                                "current_section": next_section_name,
+                                "collected_data": all_collected_data
+                            }
                         else:
-                            logger.info(f"User confirmed skipping optional section '{section_to_skip}'. Moving on.")
-
-                            current_index = -1
-                            for i, (name, _) in enumerate(flow_steps):
-                                if name == section_to_skip:
-                                    current_index = i
-                                    break
-
-                            # Ensure main schema presence for required top-level sections by inserting empty dict
+                            # Last section: try to finalize
                             try:
                                 main_schema = get_document_schema(current_doc_type)
-                                main_field_info = main_schema.model_fields.get(section_to_skip) if main_schema else None
-                                if main_field_info and main_field_info.is_required():
-                                    all_collected_data.setdefault(section_to_skip, {})
-                            except Exception:
-                                pass
-
-                            if 0 <= current_index < len(flow_steps) - 1:
-                                next_section_name, next_section_schema = flow_steps[current_index + 1]
-                                question = generate_question_for_step(next_section_name, next_section_schema)
-                                final_response = f"Okay, skipping that section. {question}"
-                                assistant_metadata = {"state": "collecting_document_data", "doc_type": current_doc_type, "current_section": next_section_name, "collected_data": all_collected_data}
-                            else: 
-                                logger.info("Skipped the last section. Finalizing document.")
-                                try:
-                                    main_schema = get_document_schema(current_doc_type)
-                                    full_document_data = main_schema(**all_collected_data)
-                                    json_preview = json.dumps(full_document_data.model_dump(by_alias=True), indent=2)
-                                    prompt_generator_func = PROMPT_GENERATORS.get(current_doc_type)
-                                    generation_prompt = prompt_generator_func(full_document_data) if prompt_generator_func else f"Draft the {current_doc_type} using:\n\n{json_preview}"
-                                    persona = system_instruction("lawyer")
-                                    doc_result = await generate_response(generation_prompt, persona)
-                                    generated_text = doc_result.get("data", {}).get("response", "")
-                                    final_response = f"Great — I have everything I need. Here's the structured data I'll use:\n```json\n{json_preview}\n```\n\n{generated_text or 'I will generate the final document next.'}"
-                                    assistant_metadata = {"state": "completed", "doc_type": current_doc_type, "collected_data": all_collected_data}
-                                except ValidationError as e:
-                                    logger.error(f"FSM State: FAILED_VALIDATION for {current_doc_type}: {e}")
-                                    # Re-route to problematic section/field with a helpful hint
-                                    try:
-                                        first_err = (e.errors() or [{}])[0]
-                                        loc = first_err.get('loc', [])
-                                        section_key = loc[0] if len(loc) > 0 else None
-                                        field_key = loc[1] if len(loc) > 1 else None
-                                        problem_msg = first_err.get('msg', 'Invalid input')
-
-                                        if section_key:
-                                            flow_map_local = {name: schema for name, schema in flow_steps}
-                                            section_schema_local = flow_map_local.get(section_key)
-                                            section_title = str(section_key).replace('_', ' ').title()
-                                            if field_key:
-                                                field_title = str(field_key).replace('_', ' ').title()
-                                                hint = ''
-                                                if 'bool' in problem_msg.lower():
-                                                    hint = " Please answer yes or no."
-                                                final_response = (
-                                                    f"There seems to be a format issue for **{field_title}** in the **{section_title}** section: {problem_msg}.{hint}\n\n"
-                                                    f"Let's correct that."
-                                                )
-                                            else:
-                                                final_response = (
-                                                    f"There seems to be a data issue in the **{section_title}** section: {problem_msg}. "
-                                                    f"Let's review that section."
-                                                )
-                                            question = generate_question_for_step(section_key, section_schema_local) if section_schema_local else ""
-                                            if question:
-                                                final_response = f"{final_response}\n\n{question}"
-                                            assistant_metadata = {"state": "collecting_document_data", "doc_type": current_doc_type, "current_section": section_key, "collected_data": all_collected_data}
-                                        else:
-                                            final_response = "There was an issue putting the final information together. Could we review the last details?"
-                                            assistant_metadata = {"state": "idle"}
-                                    except Exception:
-                                        final_response = "There was an issue putting the final information tocgether."
-                                        assistant_metadata = {"state": "failed_validation"}
-
-                    elif is_denied_skip:
-                        logger.info("User chose not to skip. Re-prompting for the same section.")
-                        section_to_fill = last_assistant_message.get('current_section')
-                        current_doc_type = last_assistant_message.get('doc_type')
-                        flow_steps = get_flow_steps(current_doc_type)
-                        schema_map = {name: schema for name, schema in flow_steps}
-                        current_schema = schema_map.get(section_to_fill)
-                        pending_optional_fields = last_assistant_message.get('pending_optional_fields')
-                        if pending_optional_fields:
-                            question = generate_optional_fields_prompt(section_to_fill, pending_optional_fields)
-                            final_response = f"Great — let's add the optional details. {question}"
-                        else:
-                            question = generate_question_for_step(section_to_fill, current_schema)
-                            final_response = f"No problem. Let's try that again. {question}"
-                        assistant_metadata = {"state": "collecting_document_data", "doc_type": current_doc_type, "current_section": section_to_fill, "collected_data": last_assistant_message.get('collected_data')}
+                                # Seed any missing required sections with no internal required fields before validation
+                                seed_empty_required_sections(main_schema, all_collected_data, flow_steps)
+                                full_document_data = main_schema(**all_collected_data)
+                                json_preview = json.dumps(full_document_data.model_dump(by_alias=True), indent=2)
+                                prompt_generator_func = PROMPT_GENERATORS.get(current_doc_type)
+                                generation_prompt = prompt_generator_func(full_document_data) if prompt_generator_func else f"Draft the {current_doc_type} using:\n\n{json_preview}"
+                                persona = system_instruction("lawyer")
+                                doc_result = await generate_response(generation_prompt, persona)
+                                generated_text = doc_result.get("data", {}).get("response", "")
+                                final_response = f"Great — I have everything I need. Here's the structured data I'll use:\n```json\n{json_preview}\n```\n\n{generated_text or 'I will generate the final document next.'}"
+                                assistant_metadata = {"state": "completed", "doc_type": current_doc_type, "collected_data": all_collected_data}
+                            except ValidationError as e:
+                                logger.error(f"Finalize error after skip for {current_doc_type}: {e}")
+                                # Fallback: insist on missing required section instead of resetting state
+                                incomplete = first_incomplete_required_section(flow_steps, all_collected_data)
+                                if incomplete:
+                                    missing_section_name, missing_schema, missing_fields = incomplete
+                                    follow_up = generate_follow_up_question(missing_section_name, missing_schema, missing_fields)
+                                    final_response = f"We can't finalize yet — I still need the {', '.join(missing_fields)} for the **{missing_section_name.replace('_',' ').title()}** section. {follow_up}"[:1000]
+                                    assistant_metadata = {
+                                        "state": "collecting_document_data",
+                                        "doc_type": current_doc_type,
+                                        "current_section": missing_section_name,
+                                        "collected_data": all_collected_data
+                                    }
+                                else:
+                                    final_response = "There was an issue putting the final information together. Could we review the last details?"
+                                    assistant_metadata = {
+                                        "state": "collecting_document_data",
+                                        "doc_type": current_doc_type,
+                                        "current_section": section_to_skip,
+                                        "collected_data": all_collected_data
+                                    }
 
                     else:
-                        section_name_str = last_assistant_message.get('current_section', 'this').replace('_', ' ')
-                        final_response = f"Sorry, I didn't catch that. Do you want to skip the **{section_name_str.title()}** section? Please answer with 'yes' or 'no'."
-                        assistant_metadata = last_assistant_message
+                        # Try to parse the reply as additional optional data for the same section
+                        parsed_optionals = {}
+                        if current_schema:
+                            try:
+                                section_fields = await parse_section_data(message, current_schema)  # returns dict of fields
+                                if isinstance(section_fields, dict) and section_fields:
+                                    parsed_optionals = section_fields
+                            except Exception as e:
+                                logger.warning(f"Optional parse failed for '{section_to_skip}': {e}")
 
-                case 'awaiting_confirmation_switch':
-                    logger.info("FSM State: AWAITING_CONFIRMATION_SWITCH.")
-                    is_confirmed = any(word in message.lower() for word in ["yes", "yep", "sure", "ok", "confirm", "proceed", "okay"])
-                    is_denied = any(word in message.lower() for word in ["no", "nope", "cancel", "stop", "wait"])
-                    
-                    if is_confirmed:
-                        new_doc_type = last_assistant_message.get('pending_doc_type')
-                        logger.info(f"User confirmed switch to '{new_doc_type}'. Starting new flow.")
-                        message = f"Yes, please start a {new_doc_type.replace('_', ' ')}."
-                        current_state = 'idle'
-                    elif is_denied:
-                        logger.info("User denied switch. Resuming previous document flow.")
-                        previous_state_data = last_assistant_message.get('previous_state', {})
-                        if previous_state_data:
-                            assistant_metadata = previous_state_data
-                            last_doc = previous_state_data.get('doc_type', 'document')
-                            last_section = previous_state_data.get('current_section')
-                            flow_steps = get_flow_steps(last_doc)
-                            schema_map = {name: schema for name, schema in flow_steps}
-                            last_schema = schema_map.get(last_section)
-                            if last_section and last_schema:
-                                question = generate_question_for_step(last_section, last_schema)
-                                final_response = f"Okay, let's continue with the {last_doc.replace('_', ' ')}. {question}"
+                        if parsed_optionals:
+                            # Merge and re-check remaining optionals
+                            logger.info(f"Merging optional data into '{section_to_skip}': {parsed_optionals}")
+                            all_collected_data.setdefault(section_to_skip, {}).update(parsed_optionals)
+
+                            remaining_optional_fields = get_missing_optional_fields(current_schema, all_collected_data.get(section_to_skip, {})) if current_schema else []
+                            if remaining_optional_fields:
+                                # Ask again, but no yes/no — user can answer or say 'skip'
+                                question = generate_optional_fields_prompt(section_to_skip, remaining_optional_fields)
+                                final_response = f"{question} You can also say 'skip' to continue."
+                                assistant_metadata = {
+                                    "state": "awaiting_skip_confirmation",
+                                    "doc_type": current_doc_type,
+                                    "current_section": section_to_skip,
+                                    "collected_data": all_collected_data,
+                                    "pending_optional_fields": remaining_optional_fields,
+                                    "asked_optional_for": section_to_skip
+                                }
                             else:
-                                final_response = "Okay, what would you like to do next?"
-                                assistant_metadata = {"state": "idle"}
+                                # Move on since no optional fields remain
+                                current_index = next((i for i, (n, _) in enumerate(flow_steps) if n == section_to_skip), -1)
+                                if 0 <= current_index < len(flow_steps) - 1:
+                                    next_section_name, next_section_schema = flow_steps[current_index + 1]
+                                    question = generate_question_for_step(next_section_name, next_section_schema)
+                                    final_response = f"Thanks, I've added that. {question}"
+                                    assistant_metadata = {
+                                        "state": "collecting_document_data",
+                                        "doc_type": current_doc_type,
+                                        "current_section": next_section_name,
+                                        "collected_data": all_collected_data
+                                    }
+                                else:
+                                    # Finalize
+                                    try:
+                                        main_schema = get_document_schema(current_doc_type)
+                                        full_document_data = main_schema(**all_collected_data)
+                                        json_preview = json.dumps(full_document_data.model_dump(by_alias=True), indent=2)
+                                        prompt_generator_func = PROMPT_GENERATORS.get(current_doc_type)
+                                        generation_prompt = prompt_generator_func(full_document_data) if prompt_generator_func else f"Draft the {current_doc_type} using:\n\n{json_preview}"
+                                        persona = system_instruction("lawyer")
+                                        doc_result = await generate_response(generation_prompt, persona)
+                                        generated_text = doc_result.get("data", {}).get("response", "")
+                                        final_response = f"Great — I have everything I need. Here's the structured data I'll use:\n```json\n{json_preview}\n```\n\n{generated_text or 'I will generate the final document next.'}"
+                                        assistant_metadata = {"state": "completed", "doc_type": current_doc_type, "collected_data": all_collected_data}
+                                    except ValidationError as e:
+                                        logger.error(f"Finalize error after adding optional data for {current_doc_type}: {e}")
+                                        final_response = "There was an issue putting the final information together. Could we review the last details?"
+                                        assistant_metadata = {"state": "idle"}
                         else:
-                            final_response = "Okay, cancelling that. How can I help you?"
-                            assistant_metadata = {"state": "idle"}
-                    else:
-                        final_response = "Sorry, I didn't quite understand. Do you want to switch to the new document? Please answer with 'yes' or 'no'."
-                        assistant_metadata = last_assistant_message
+                            # Neutral re-prompt: allow user to provide info or say skip
+                            field_list = ", ".join(pending_optional_fields) if pending_optional_fields else "optional details"
+                            final_response = f"You can add more details for {section_to_skip.replace('_',' ').title()} ({field_list}), or say 'skip' to continue."
+                            assistant_metadata = last_assistant_message
 
                 case 'awaiting_edit_selection':
                     logger.info("FSM State: AWAITING_EDIT_SELECTION.")

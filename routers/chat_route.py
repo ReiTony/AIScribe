@@ -32,7 +32,8 @@ from utils.document_handler import (
 
 from utils.document_flow_manager import (
     get_document_schema, 
-    get_flow_steps, is_section_complete,
+    get_flow_steps, 
+    is_section_complete,
     generate_question_for_step,
     generate_follow_up_question,
     has_required_fields,

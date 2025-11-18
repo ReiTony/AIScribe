@@ -4,7 +4,12 @@ from pydantic import BaseModel
 from requests import get
 from llm.generate_doc_prompt import system_instruction
 from llm.llm_client import generate_response
-from utils.document_flow_manager import get_document_schema, get_flow_steps
+from utils.document_flow_manager import (
+    get_document_schema, 
+    get_flow_steps,
+    is_section_complete,
+    has_required_fields
+)
 
 logger = logging.getLogger("DocumentParseHelpers")
 
@@ -259,3 +264,81 @@ async def parse_edit_selection(message: str, available_sections: List[str]) -> O
             f"which is not in the available sections: {available_sections}"
         )
         return None
+
+
+SKIP_TOKENS = ("skip", "next", "continue", "proceed", "no more", "that's all", "move on", "go ahead", "advance")
+def wants_to_skip(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return any(tok in t for tok in SKIP_TOKENS)
+
+# Simple acknowledgement tokens that often mean "I have no more data" but may still leave required fields missing
+ACK_TOKENS = {"ok", "okay", "yes", "yep", "sure", "alright", "done"}
+def is_ack(text: str) -> bool:
+    return (text or "").strip().lower() in ACK_TOKENS
+
+# Helper: find first section with missing required fields (returns name, schema, missing list)
+def first_incomplete_required_section(flow_steps: List[Tuple[str, Type[BaseModel]]], collected: Dict) -> Optional[Tuple[str, Type[BaseModel], List[str]]]:
+    for name, schema in flow_steps:
+        section_data = collected.get(name, {})
+        complete, missing = is_section_complete(schema, section_data)
+        if not complete:  # missing contains user-friendly names already
+            return name, schema, missing
+    return None
+
+# Helper: seed empty models for required top-level sections that have no internal required fields.
+def seed_empty_required_sections(main_schema: Type[BaseModel], collected: Dict, flow_steps: List[Tuple[str, Type[BaseModel]]]) -> None:
+    """Ensures that any required top-level section whose nested schema has ZERO required fields
+    is present in collected data. This prevents Pydantic validation errors for entirely optional
+    subsections (e.g., signature_info) that are themselves required at the top level.
+    """
+    for field_name, field_info in main_schema.model_fields.items():
+        if field_info.is_required() and field_name not in collected:
+            # Determine nested schema
+            nested_schema = None
+            for n, s in flow_steps:
+                if n == field_name:
+                    nested_schema = s
+                    break
+            if nested_schema and issubclass(nested_schema, BaseModel):
+                # Count required fields inside the nested schema
+                inner_required = [f for f, fi in nested_schema.model_fields.items() if fi.is_required()]
+                if len(inner_required) == 0:
+                    try:
+                        instance = nested_schema()  # rely on defaults
+                        collected[field_name] = instance.model_dump(by_alias=True, exclude_unset=True)
+                        logger.info(f"Seeded empty required section '{field_name}' to avoid validation error.")
+                    except Exception as e:
+                        logger.warning(f"Failed seeding empty section '{field_name}': {e}")
+
+# NEW: Enforce required fields for a section, returning an insist prompt if missing
+def enforce_required_fields(section_name: str, section_schema: Type[BaseModel], collected_section: Dict) -> Optional[str]:
+    """If required fields are missing, build a concise insist message listing them and
+    guiding the user to provide them. Returns None if section is complete.
+    """
+    complete, missing = is_section_complete(section_schema, collected_section or {})
+    if complete:
+        return None
+    # missing already user-friendly (title-cased) from is_section_complete
+    if len(missing) == 1:
+        needed = missing[0]
+        return (f"I still need the **{needed}** for the **{section_name.replace('_',' ').title()}** section before we can continue. "
+                f"Please provide it now (you can include any additional details in the same message).")
+    else:
+        if len(missing) > 1:
+            needed = ", ".join(missing[:-1]) + f" and {missing[-1]}"
+        else:
+            needed = ", ".join(missing)
+        return (f"I still need the **{needed}** for the **{section_name.replace('_',' ').title()}** section. "
+                f"Please provide these required details in a single message.")
+
+# NEW: Treat sections with zero required fields as incomplete until they contain any data
+def is_effectively_complete(section_schema: Type[BaseModel], section_data: Dict) -> Tuple[bool, List[str]]:
+    try:
+        if has_required_fields(section_schema):
+            return is_section_complete(section_schema, section_data or {})
+        # No required fields: only complete if user provided any value
+        has_data = bool(section_data) and any(v is not None and v != [] and v != {} and v != "" for v in (section_data or {}).values())
+        return (has_data, [])
+    except Exception:
+        # Safe fallback
+        return (False, [])
