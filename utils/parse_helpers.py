@@ -1,10 +1,10 @@
-import json
+import json, logging
 from typing import Dict, List, Tuple, Type, Optional
 from pydantic import BaseModel
+from requests import get
 from llm.generate_doc_prompt import system_instruction
 from llm.llm_client import generate_response
 from utils.document_flow_manager import get_document_schema, get_flow_steps
-import logging
 
 logger = logging.getLogger("DocumentParseHelpers")
 
@@ -94,73 +94,78 @@ async def parse_user_reply_for_sections(
         logger.error(f"Intelligent parser failed to decode or process LLM response. Error: {e}")
         return {}
 
-async def parse_section_data(user_message: str, schema: Type[BaseModel]) -> Optional[Dict]:
-    """
-    Uses a targeted LLM call with few-shot examples to parse user text
-    into a specific Pydantic sub-schema. This version is more robust.
-    """
+async def parse_section_data(
+    user_message: str,
+    schema: Type[BaseModel],
+    section_name: Optional[str] = None,
+    include_schema: bool = False,
+    include_model: bool = False
+) -> Optional[Dict]:
     schema_json = schema.model_json_schema()
-
     prompt = f"""
-    You are a world-class data extraction engine. Your task is to analyze the user's text and extract information to create a JSON object that matches the provided schema's fields.
+    You are a data extraction engine. Extract only fields present in the schema.
 
-    **Key Instructions:**
-    - Analyze the user's text for relevant information.
-    - Map extracted information to the correct field in the JSON schema.
-    - If a field is not mentioned in the user's text, OMIT IT from the JSON.
-    - **Crucially, if the user's text contains NO information relevant to the schema's fields, your ONLY output MUST be an empty JSON object: {{}}.**
-    - Your output must ONLY be a raw JSON object.
-
-    **JSON Schema to Follow:**
+    Schema:
     ```json
     {schema_json}
     ```
 
-    ---
-    **Example 1 (Relevant Data):**
-    User Text: "The date is tomorrow and the subject is Final Warning. Urgency is high, it's for a payment demand."
-    Your JSON Output: {{"letterDate": "[Date for tomorrow]", "subject": "Final Warning", "urgency": "High", "category": "Payment Demand"}}
-
-    **Example 2 (Irrelevant Data):**
-    User Text: "The employer is ACME Inc."
-    Your JSON Output: {{}}
-    
-    **Example 3 (Partial Data):**
-    User Text: "letter date: 11/15/25, Debt collection"
-    Your JSON Output: {{"letterDate": "11/15/25", "subject": "Debt collection"}}
-    ---
-
-    **Now, analyze this new user text:**
-
-    **User Text to Analyze:**
+    User Text:
     ---
     {user_message}
     ---
 
-    Your JSON Output:
+    Rules:
+    - Infer fields from context.
+    - Omit absent fields.
+    - Output ONLY raw JSON object, no prose.
     """
     persona = system_instruction("data_extractor")
+    response_text = ""  # ensure always defined
     try:
-        response = await generate_response(prompt, persona)
-        response_text = response.get("data", {}).get("response", "").strip()
-        
+        llm_resp = await generate_response(prompt, persona)
+        response_text = llm_resp.get("data", {}).get("response", "").strip()
+
         if response_text.startswith("```json"):
             response_text = response_text[7:]
         if response_text.endswith("```"):
             response_text = response_text[:-3]
 
         if not response_text:
-             logger.warning("LLM returned an empty response for section parsing.")
-             return {}
-        
-        data = json.loads(response_text)
-        logger.info(f"LLM successfully parsed section data: {data}")
-        return data
-        
-    except (json.JSONDecodeError, Exception) as e:
-        logger.error(f"Failed to parse section data from LLM response '{response_text}'. Error: {e}")
+            logger.warning("LLM empty response for section parse.")
+            parsed = {}
+        else:
+            try:
+                parsed = json.loads(response_text)
+                if not isinstance(parsed, dict):
+                    parsed = {}
+            except json.JSONDecodeError:
+                logger.error(f"JSON decode failed. Raw: {response_text}")
+                parsed = {}
+
+        if section_name or include_schema or include_model:
+            out = {"data": parsed}
+            if section_name:
+                out["section"] = section_name
+            if include_model:
+                out["model"] = schema.__name__
+            if include_schema:
+                out["schema"] = schema_json
+            return out
+        return parsed
+    except Exception as e:
+        logger.error(f"Failed to parse section data. Error: {e}; raw='{response_text}'")
+        if section_name or include_schema or include_model:
+            return {
+                "section": section_name,
+                "model": schema.__name__ if include_model else None,
+                "schema": schema_json if include_schema else None,
+                "data": {}
+            }
         return {}
     
+
+
 
 def convert_to_aliased_json(doc_type: str, collected_data: Dict) -> Dict:
     """

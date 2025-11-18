@@ -68,7 +68,7 @@ class SignatureInfo(BaseModel):
     notary_expiry: Optional[str] = Field(None, alias='notaryExpiry')
 
 class Miscellaneous(BaseModel):
-    attachments: List[str] = []
+    attachments: Optional[List[str]] = []
     cc_recipients: List[str] = Field([], alias='ccRecipients')
     delivery_method: Literal['Email', 'Registered Mail', 'Personal Delivery', 'Courier'] = Field('Email', alias='deliveryMethod')
     tracking_number: Optional[str] = Field(None, alias='trackingNumber')
