@@ -202,3 +202,23 @@ Analyze the user's message and determine their intent:
 Classify the intent and respond with ONE of these exact words: CONSULTATION, DOCUMENT_GENERATION, BOTH, or DOCUMENT_INFO_GATHERING
 
 Consider the conversation context - if previous message asked for document info and user is now providing it, classify as DOCUMENT_INFO_GATHERING."""
+
+def get_general_conversation_prompt(chat_history: str, current_message: str) -> str:
+    """
+    Returns a prompt specifically for handling greetings, thanks, and small talk
+    while maintaining the professional legal consultant persona.
+    """
+    return f"""You are a professional Philippine Legal Consultant and AI Assistant. 
+    
+The user has engaged in general conversation (greeting, gratitude, or small talk).
+    
+USER MESSAGE: "{current_message}"
+    
+INSTRUCTIONS:
+1. Respond politely, professionally, and warmly.
+2. Acknowledge what they said (e.g., return the greeting, say "you're welcome").
+3. Keep the response BRIEF (1-2 sentences).
+4. Gently steer the conversation back to how you can help them with Philippine legal questions or document drafting.
+5. Do NOT provide legal advice in this specific response.
+
+Make the user feel heard, then ask how you may assist them today."""
