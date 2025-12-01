@@ -11,7 +11,8 @@ from pydantic import BaseModel, ValidationError
 from llm.generate_doc_prompt import system_instruction
 from llm.llm_client import generate_response
 from llm.consultant_prompt import (
-    get_consultation_with_history_prompt
+    get_consultation_with_history_prompt, 
+    get_general_conversation_prompt
 )
 from db.connection import get_db
 from utils.encryption import get_current_user, get_current_user_optional
@@ -61,11 +62,15 @@ def get_chat_collection(db: AsyncIOMotorClient):
     return db["legalchat_histories"]
 
 
-def combine_responses(consult_resp: Optional[str], doc_resp: Optional[str], intent_type: str) -> str:
-    """Combines consultation and document responses based on intent."""
+def combine_responses(consult_resp: Optional[str], doc_resp: Optional[str], general_resp: Optional[str], intent_type: str) -> str:
+    """Combines consultation, document, and general responses based on intent."""
     if intent_type == 'hybrid' and consult_resp and doc_resp:
         return f"{consult_resp}\n\nRegarding the document you requested:\n{doc_resp}"
-    return doc_resp or consult_resp or "I'm sorry, I'm not sure how to respond. Can you please clarify?"
+    
+    if intent_type == 'general_conversation':
+        return general_resp or "Hello! I am your legal assistant. How may I help you with your legal documents or questions today?"
+        
+    return doc_resp or consult_resp or general_resp or "I'm sorry, I'm not sure how to respond. Can you please clarify?"
 
 
 
@@ -480,13 +485,15 @@ async def chat_endpoint(
                     
                     intent = await detect_intent(message, history_text)
                     logger.info(f"Intent detected: {intent}")
-                    document_response, consultation_response = None, None
+                    
+                    # 1. Initialize ALL response variables to None
+                    document_response, consultation_response, general_response = None, None, None
 
+                    # 2. Handle Document Requests
                     if intent.get("needs_document"):
                         doc_type = intent.get('document_type') or detect_document_type(message)
                         if doc_type:
                             flow_steps = get_flow_steps(doc_type)
-                            # Pre-parse the user's first message to see if they provided data upfront
                             initial_collected_data = await parse_user_reply_for_sections(message, flow_steps)
                             
                             next_incomplete_section_name, next_incomplete_section_schema = None, None
@@ -497,37 +504,52 @@ async def chat_endpoint(
                             
                             if next_incomplete_section_name:
                                 question = generate_question_for_step(next_incomplete_section_name, next_incomplete_section_schema)
-                                # Give a smarter response if we pre-filled some data
                                 if initial_collected_data:
                                     filled_sections = ", ".join(f"'{s.replace('_', ' ')}'" for s in initial_collected_data.keys())
                                     document_response = f"Great, I've noted down the details for the {filled_sections} section. Now, {question[0].lower()}{question[1:]}"
                                 else:
                                     document_response = question
                                 
-                                # Kick off the FSM
                                 assistant_metadata = {
                                     "state": "collecting_document_data", 
                                     "doc_type": doc_type, 
                                     "current_section": next_incomplete_section_name, 
                                     "collected_data": initial_collected_data or {}
                                 }
-                            else: # A rare case where the user provides everything in the first message
+                            else:
                                 document_response = "It looks like you've provided everything I need. Let me process that."
                                 assistant_metadata = {"state": "processing", "doc_type": doc_type, "collected_data": initial_collected_data}
                         else:
                             document_response = "I can help with many documents, but I'm not sure which one you need. Could you clarify?"
 
+                    # 3. Handle Consultation
                     if intent.get("needs_consultation"):
                         logger.info("Routing to consultation...")
-                        consult_prompt = get_consultation_with_history_prompt(history_text, message)
+                        # FIX: Pass 'history_docs' (list) here because the function iterates over it
+                        consult_prompt = get_consultation_with_history_prompt(history_docs, message)
                         persona = system_instruction("philippine_law_consultant")
                         consult_result = await generate_response(consult_prompt, persona)
                         consultation_response = consult_result.get("data", {}).get("response", "")
 
-                    # Combine the responses if the user had a hybrid intent
-                    final_response = combine_responses(consultation_response, document_response, intent.get('type', ''))
+                    # 4. Handle General Conversation
+                    # Check for general conversation flag
+                    if intent.get("intent") == "GENERAL_CONVERSATION" or intent.get("is_general_conversation"):
+                        # FIX: Pass 'history_text' (string) here to match the type hint of the prompt function
+                        prompt = get_general_conversation_prompt(history_text, message)
+                        persona = system_instruction("lawyer") 
+                        gen_result = await generate_response(prompt, persona)
+                        general_response = gen_result.get("data", {}).get("response", "")
+
+                    # 5. Combine Responses
+                    # CRITICAL FIX: This is now UN-INDENTED so it runs for ALL intents
+                    final_response = combine_responses(
+                        consultation_response, 
+                        document_response, 
+                        general_response, 
+                        intent.get('intent', '') # FIX: Use 'intent' key, not 'type'
+                    )
                     
-                    # A final fallback if no specific response was generated
+                    # 6. Fallback
                     if not final_response:
                         final_response = "I am a legal assistant. I can help with legal questions or generate documents like a Demand Letter. How may I assist you?"
 
